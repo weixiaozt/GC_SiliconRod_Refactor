@@ -5,3 +5,4 @@ from .inspect_engine import (
     InspectEngineConfig,
     detection_to_inspect_data,
 )
+from .scanner_client import ScannerClient

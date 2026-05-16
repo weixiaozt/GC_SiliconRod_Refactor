@@ -57,6 +57,7 @@ try:
     from data.shift_stats import ShiftStats
     from core.tcp_server import InspectData     # 只用数据类，不启动 TCPServer
     from core.inspect_engine import InspectEngine, InspectEngineConfig
+    from core.scanner_client import ScannerClient
     from core.serial_manager import SerialManager
     from core.http_client import MesHttpClient
     from ui.styles import DARK_STYLE
@@ -117,7 +118,28 @@ class SiRodCameraApp(QObject):
         # MES
         self.http_client = MesHttpClient(self.config)
 
+        # ── 扫码枪客户端 ──
+        scanner_host = self.config.get("scanner.host", "192.168.12.56")
+        scanner_port = int(self.config.get("scanner.port", 5000))
+        scanner_enabled = bool(self.config.get("scanner.enabled", True))
+        self.scanner = ScannerClient(
+            host=scanner_host, port=scanner_port,
+            poll_interval_s=float(self.config.get("scanner.poll_interval_s", 5.0)),
+            recv_timeout_s=float(self.config.get("scanner.recv_timeout_s", 1.0)),
+            reconnect_interval_s=float(
+                self.config.get("scanner.reconnect_interval_s", 3.0)),
+        ) if scanner_enabled else None
+        logger.info(
+            f"扫码枪: enabled={scanner_enabled}, host={scanner_host}:{scanner_port}"
+        )
+
         # ── 检测引擎（取代原 TCPServer + Run.bat）──
+        # NG 触发类别（从 config 读 list[str]，转 frozenset）
+        ng_classes_cfg = self.config.get("judge.ng_trigger_classes", None)
+        ng_classes = (frozenset(ng_classes_cfg)
+                       if isinstance(ng_classes_cfg, list) and ng_classes_cfg
+                       else None)
+
         engine_cfg = InspectEngineConfig(
             camera_uid=0,
             width=int(self.config.get("camera.width", 1024)),
@@ -133,14 +155,22 @@ class SiRodCameraApp(QObject):
                 max_count=int(self.config.get("judge.max_count", 10)),
                 max_length=float(self.config.get("judge.max_length", 2)),
             ),
+            ng_trigger_classes=ng_classes,
         )
-        # 棒号注入 — 当前 mock，后续替换为扫码枪客户端
-        self._latest_rod_id = "NoRead"
+
+        # 棒号注入 — 扫码枪可用时从扫码枪取，否则 mock
+        self._manual_rod_id = "NoRead"
         self._rod_id_lock = threading.Lock()
 
         def _rod_id_provider() -> str:
+            # 消费式取扫码结果（与 Halcon Code_Tcp + 主循环 dequeue 行为一致）：
+            # 每次抓图前取走最新棒号；没扫到的话回退到 manual 值。
+            if self.scanner is not None and self.scanner.is_running:
+                rod = self.scanner.take_rod_id()
+                if rod and rod != "NoRead":
+                    return rod
             with self._rod_id_lock:
-                return self._latest_rod_id
+                return self._manual_rod_id
 
         self.engine = InspectEngine(
             engine_cfg,
@@ -148,7 +178,10 @@ class SiRodCameraApp(QObject):
             on_inspect=self._on_inspect_data,   # 工作线程
             on_error=lambda e: logger.error(f"InspectEngine: {e}"),
         )
-        logger.info(f"检测引擎配置: {engine_cfg}")
+        logger.info(
+            f"检测引擎配置: judge={engine_cfg.judge_config}, "
+            f"ng_trigger_classes={set(ng_classes) if ng_classes else '(默认 隐裂)'}"
+        )
 
         # 班次统计
         reset_times = self.config.get("shift.reset_times", ["08:00", "20:00"])
@@ -242,6 +275,13 @@ class SiRodCameraApp(QObject):
             logger.error(f"报警灯串口打开失败: {e}", exc_info=True)
             self.window.set_device_status("报警灯", False)
 
+        # 扫码枪
+        if self.scanner is not None:
+            try:
+                self.scanner.start()
+            except Exception as e:
+                logger.error(f"扫码枪启动失败: {e}", exc_info=True)
+
         # 检测引擎（取代 TCP / Run.bat）
         try:
             self.engine.start()
@@ -279,10 +319,13 @@ class SiRodCameraApp(QObject):
 
         for name, svc, method in [
             ("检测引擎", self.engine, "stop"),
+            ("扫码枪",   self.scanner, "stop"),
             ("飞书同步", self.feishu, "stop"),
             ("串口",     self.serial_manager, "close"),
             ("数据库",   self.database, "disconnect"),
         ]:
+            if svc is None:
+                continue
             try:
                 getattr(svc, method)()
                 logger.info(f"{name} 已关闭")

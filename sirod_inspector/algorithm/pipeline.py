@@ -72,7 +72,8 @@ _MIN_AREA_PX = 100              # 面积
 # → 每条边各向外扩约 25 px（不是 50）
 _CROP_PADDING_PX = 25
 
-# 标记为 NG 的分类类别（Halcon 端逻辑：仅"隐裂"上报 NG，其他类别记录但不报警）
+# 默认的 NG 触发类别（Halcon 端逻辑：仅"隐裂"上报 NG，其他类别记录但不报警）
+# Pipeline 构造时可通过 ``ng_trigger_classes`` 参数覆盖，对应 settings.judge.ng_trigger_classes
 NG_TRIGGER_CLASSES = frozenset({"隐裂"})
 
 
@@ -127,15 +128,31 @@ class Pipeline:
     def __init__(self,
                  model_seg_path: str | Path,
                  model_cls_path: str | Path,
-                 judge_config: Optional[JudgeConfig] = None):
+                 judge_config: Optional[JudgeConfig] = None,
+                 *,
+                 ng_trigger_classes: Optional[frozenset] = None):
+        """
+        Parameters
+        ----------
+        ng_trigger_classes : frozenset[str] | None
+            分类结果属于哪些类别时标 NG。``None`` 时用默认 ``{"隐裂"}``，
+            对应 Halcon 端行为。
+        """
         self.segmenter = Segmenter(model_seg_path)
         self.classifier = Classifier(model_cls_path)
         self.judge_config = judge_config or JudgeConfig()
 
+        # 触发 NG 的分类标签集合
+        if ng_trigger_classes is None:
+            self.ng_trigger_classes = NG_TRIGGER_CLASSES
+        else:
+            self.ng_trigger_classes = frozenset(ng_trigger_classes)
+
         logger.info(
             f"检测流水线就绪: seg classes={self.segmenter.class_names} "
             f"cls classes={self.classifier.class_names} "
-            f"judge={self.judge_config}"
+            f"judge={self.judge_config} "
+            f"ng_trigger_classes={set(self.ng_trigger_classes)}"
         )
 
     # ─────────── 资源管理 ───────────
@@ -420,7 +437,7 @@ class Pipeline:
                 # copy 一份避免外部修改预处理图时连带改动
                 classified.crop = crop.copy()
 
-            if cls.name in NG_TRIGGER_CLASSES:
+            if cls.name in self.ng_trigger_classes:
                 if classified.outer_radius > worst_ng_length:
                     worst_ng_length = classified.outer_radius
                     worst_ng_type = cls.name

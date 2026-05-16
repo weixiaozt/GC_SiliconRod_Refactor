@@ -232,3 +232,97 @@ iter2 3dce4df:   InspectEngine
 iter1 1d46510:   BV camera ctypes
 iter0 ee4eaa2:   algorithm baseline
 ```
+
+---
+
+## iter4 · 2026-05-16 · 扫码枪 + NG 类别可配置
+
+### 完成
+
+**新模块** [sirod_inspector/core/scanner_client.py](sirod_inspector/core/scanner_client.py)（~190 行）
+
+- `ScannerClient(host, port)`：Halcon `Code_Tcp` 'z' 协议兼容（NUL 终止字符串）
+- 后台线程循环：连接 → 发 `"start\0"` → 收 `"<棒号>\0"` → 缓存 → 等 5s → 下一次
+- **自动重连**：连接断开后按 `reconnect_interval_s` 重试
+- 线程安全的两种取号 API：
+  - `current_rod_id()`：peek（不消费）
+  - `take_rod_id()`：consume（取走并 reset 为 "NoRead"）
+- 配置项（main_camera.py 从 config.json 读）：
+  ```json
+  {"scanner": {
+      "enabled": true,
+      "host": "192.168.12.56", "port": 5000,
+      "poll_interval_s": 5.0,
+      "recv_timeout_s": 1.0,
+      "reconnect_interval_s": 3.0
+  }}
+  ```
+
+**NG 触发类别可配置**
+
+- `pipeline.Pipeline(...).ng_trigger_classes` 实例属性（默认 `{"隐裂"}`）
+- `InspectEngineConfig.ng_trigger_classes` 字段透传
+- `main_camera.py` 从 `config.json` 的 `judge.ng_trigger_classes`（list[str]）读取
+  ```json
+  {"judge": {"ng_trigger_classes": ["隐裂", "崩边"]}}
+  ```
+
+### iter4 self-audit — 发现并修复 1 个语义差异
+
+**问题**：Halcon `Rec_Code` + 主循环 `dequeue_message` 是 **消费式** —
+每次抓图前从队列里取走最新棒号，没有就 'NoRead'。我最初的实现是 **永续 latest** —
+扫到的码会一直挂着，导致"一次扫码错配多根棒"。
+
+**修复**：加 `take_rod_id()` 方法。`main_camera.py` 的 `rod_id_provider` 改用它。
+单元测试验证 consume 语义正确：
+- peek 不消费、take 消费、take 完返回默认 "NoRead"
+
+### 测试
+
+[tests/smoke_scanner.py](tests/smoke_scanner.py) — 完整链路（不依赖真硬件）：
+
+- 启动 mock TCP 服务器（127.0.0.1:随机端口）
+- 阶段 1：连接 + 收 3 个棒号
+- 阶段 2：服务器主动掉连 → 客户端自动重连，请求计数从 3 升到 12
+- 阶段 3：优雅停止
+- **结果**：全过
+
+### 部署建议
+
+工厂机第一次跑 `main_camera.py` 前，确认 `config.json` 包含：
+
+```json
+{
+  "scanner": {
+    "enabled": true,
+    "host": "192.168.12.56", "port": 5000
+  },
+  "camera": {
+    "loop_interval_s": 2.0,
+    "exposure_us": null
+  },
+  "judge": {
+    "max_area": 10, "sum_area": 10, "max_count": 10, "max_length": 2,
+    "ng_trigger_classes": ["隐裂"]
+  }
+}
+```
+
+未填的字段全部用代码默认值（即 Halcon 端原值）。
+
+### 下一迭代候选
+
+1. **settings_page UI 加 NG 类别复选框** — 让用户在 UI 里勾选触发 NG 的类别（当前只能改 config.json）
+2. **Modbus PLC 接入** — Halcon 端 `Read_Modbus` / `Call_PLC_Can_Read_MysqlTp` 等行为
+3. **批量 cls 推理** — 多缺陷一次过模型，目前是逐个串行
+4. **真机集成测试** — 等用户在工厂机跑过 `main_camera.py` 报告 issue
+
+### git
+
+```
+iter4 <new-sha>: scanner + NG classes configurable
+iter3 71951ea: main_camera.py
+iter2 3dce4df: InspectEngine
+iter1 1d46510: BV camera ctypes
+iter0 ee4eaa2: algorithm baseline
+```
