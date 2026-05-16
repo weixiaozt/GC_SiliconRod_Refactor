@@ -40,7 +40,14 @@ import numpy as np
 # ============================================================
 
 class MockBVCamera:
-    """模拟 BVCamera：每次 ``trigger_and_grab`` 从 source_image 循环返回下一张图"""
+    """模拟 BVCamera：每次 ``trigger_and_grab`` 从 source_image 循环返回下一张图
+
+    每完成一圈后会触发 ``_on_lap_complete`` 回调，可用于自动清理 D:/SiRod
+    防止长跑硬盘爆满。
+    """
+
+    # 回调：每跑完一圈触发（类级属性，便于外部 patch）
+    on_lap_complete = None      # callable(lap_index, total_images) | None
 
     def __init__(self, uid: int = 0, **kwargs):
         self.model = "Mock-BV-C3110GE"
@@ -59,6 +66,7 @@ class MockBVCamera:
         if not self._images:
             raise RuntimeError(f"未找到 source_image/*.tif，路径: {src_dir}")
         self._idx = 0
+        self._lap = 0
         self._lock = threading.Lock()
         print(f"[MockBVCamera] 加载 {len(self._images)} 张图作为模拟数据源:")
         for i, name in enumerate(self._image_names):
@@ -101,9 +109,20 @@ class MockBVCamera:
         with self._lock:
             img = self._images[self._idx]
             name = self._image_names[self._idx]
-            self._idx = (self._idx + 1) % len(self._images)
+            next_idx = self._idx + 1
+            lap_done = next_idx >= len(self._images)
+            self._idx = 0 if lap_done else next_idx
+            if lap_done:
+                self._lap += 1
         # 返回 copy，避免下游误改
-        print(f"[MockBVCamera] 触发 → 返回 {name}")
+        print(f"[MockBVCamera] 触发 → 返回 {name}"
+              + (f"  [圈 {self._lap} 已完成]" if lap_done else ""))
+        # 一圈完成回调（在持锁外调用，避免回调里阻塞影响下次触发）
+        if lap_done and MockBVCamera.on_lap_complete is not None:
+            try:
+                MockBVCamera.on_lap_complete(self._lap, len(self._images))
+            except Exception as e:
+                print(f"[MockBVCamera] on_lap_complete 回调异常: {e}")
         return img.copy()
 
     # 兼容 BVCamera 的 feature CRUD（设过就吞掉）
@@ -123,10 +142,60 @@ class MockBVCamera:
 # Monkey-patch + 启动 main_camera 主程序
 # ============================================================
 
+def _cleanup_sirod_disk(base_dir: Path = Path(r"D:\SiRod"),
+                         keep_marked: bool = False) -> tuple:
+    """自动清理 D:/SiRod 存图，防硬盘爆。
+
+    Returns (deleted_bytes, deleted_count)
+    """
+    if not base_dir.is_dir():
+        return 0, 0
+    deleted_bytes = 0
+    deleted_count = 0
+    # 只清存图相关子目录，不动 base_dir 本身（防止误删用户其他东西）
+    targets = ["ImageRaw", "WebImage", "images"]
+    for sub in targets:
+        d = base_dir / sub
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if p.is_file():
+                try:
+                    deleted_bytes += p.stat().st_size
+                    p.unlink()
+                    deleted_count += 1
+                except Exception:
+                    pass
+        # 删空目录
+        for d2 in sorted(d.rglob("*"), key=lambda x: -len(str(x))):
+            try:
+                if d2.is_dir():
+                    d2.rmdir()
+            except Exception:
+                pass
+    return deleted_bytes, deleted_count
+
+
+def _on_lap_complete(lap: int, n_images: int):
+    """每跑完一圈 source_image，清一次 D:/SiRod"""
+    bytes_freed, n = _cleanup_sirod_disk()
+    print(f"[AutoCleanup] 圈 {lap} 完成（{n_images} 张），"
+          f"清理 {n} 个文件 ({bytes_freed/1024/1024:.0f} MB)")
+
+
 def main() -> int:
     print("=" * 60)
     print("Mock 相机模式：用 source_image/*.tif 模拟相机喂 UI")
     print("=" * 60)
+
+    # 启动前清一次（防上次残留)
+    bytes_freed, n = _cleanup_sirod_disk()
+    if n > 0:
+        print(f"[AutoCleanup] 启动前清理 {n} 个旧文件 "
+              f"({bytes_freed/1024/1024:.0f} MB)")
+
+    # 注册回调：每跑完一圈清一次
+    MockBVCamera.on_lap_complete = _on_lap_complete
 
     # 关键：main_camera.py 内部用 `from core.inspect_engine import ...`，
     # 所以要 patch 的是 `core.inspect_engine`（不是 sirod_inspector.core.inspect_engine）

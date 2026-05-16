@@ -49,7 +49,10 @@ import cv2
 import numpy as np
 
 from .inference import Classifier, Segmenter
-from .judge import DefectStats, JudgeConfig, JudgeVerdict, judge_by_rules
+from .judge import (
+    DefectStats, JudgeConfig, JudgeVerdict, judge_by_rules,
+    ClassRule, ClassJudgeVerdict, judge_per_class, DEFAULT_CLASS_RULES,
+)
 from .preprocess import preprocess
 
 logger = logging.getLogger("SiRod.Pipeline")
@@ -133,29 +136,50 @@ class Pipeline:
                  model_cls_path: str | Path,
                  judge_config: Optional[JudgeConfig] = None,
                  *,
-                 ng_trigger_classes: Optional[frozenset] = None):
+                 ng_trigger_classes: Optional[frozenset] = None,
+                 class_rules: Optional[List[ClassRule]] = None):
         """
         Parameters
         ----------
         ng_trigger_classes : frozenset[str] | None
-            分类结果属于哪些类别时标 NG。``None`` 时用默认 ``{"隐裂"}``，
-            对应 Halcon 端行为。
+            旧 API（向后兼容）—— 分类落在此集合中即标 NG。
+            如同时传 ``class_rules``，``class_rules`` 优先。``None`` + 无 class_rules
+            时用默认 ``{"隐裂"}``。
+        class_rules : list[ClassRule] | None
+            新 API —— 每类独立 5 字段规则。``None`` 时由 ``ng_trigger_classes``
+            构造一个兼容旧行为的规则表。
         """
         self.segmenter = Segmenter(model_seg_path)
         self.classifier = Classifier(model_cls_path)
         self.judge_config = judge_config or JudgeConfig()
 
-        # 触发 NG 的分类标签集合
-        if ng_trigger_classes is None:
-            self.ng_trigger_classes = NG_TRIGGER_CLASSES
+        # 构造 class_rules（优先用传入的，否则从 ng_trigger_classes 兼容构造）
+        if class_rules is not None and class_rules:
+            self.class_rules = list(class_rules)
         else:
-            self.ng_trigger_classes = frozenset(ng_trigger_classes)
+            ng_set = (set(ng_trigger_classes) if ng_trigger_classes
+                       else {"隐裂"})
+            # 用默认规则模板，但把 report_ng 按 ng_set 重置
+            self.class_rules = []
+            for r in DEFAULT_CLASS_RULES:
+                new_r = ClassRule(
+                    name=r.name,
+                    report_ng=(r.name in ng_set),
+                    max_area=r.max_area, max_length=r.max_length,
+                    max_count=r.max_count, min_confidence=r.min_confidence,
+                )
+                self.class_rules.append(new_r)
+
+        # 向后兼容：暴露 ng_trigger_classes 供旧代码读
+        self.ng_trigger_classes = frozenset(
+            r.name for r in self.class_rules if r.report_ng
+        )
 
         logger.info(
             f"检测流水线就绪: seg classes={self.segmenter.class_names} "
             f"cls classes={self.classifier.class_names} "
             f"judge={self.judge_config} "
-            f"ng_trigger_classes={set(self.ng_trigger_classes)}"
+            f"ng_classes={set(self.ng_trigger_classes)}"
         )
 
     # ─────────── 资源管理 ───────────
@@ -410,16 +434,12 @@ class Pipeline:
     def _classify_defects(self, image: np.ndarray,
                            result: DetectionResult,
                            *, keep_crops: bool = False) -> None:
-        """对每个缺陷区域 crop → 分类，更新 ``result`` 中的分类信息。
+        """对每个缺陷区域 crop → 分类 → 按 per-class 规则判 NG。
 
-        若任一缺陷分到 ``NG_TRIGGER_CLASSES`` 中（如「隐裂」），
-        把 ``result`` 标为 NG。
+        分类完成后调用 ``judge_per_class``，按每类独立的 5 字段规则
+        （report_ng/max_area/max_length/max_count/min_confidence）做最终判定。
         """
         rows, cols = image.shape[:2]
-
-        # 跟踪「最严重」缺陷（用于 result.defect_type / max_length）
-        worst_ng_length = -1.0
-        worst_ng_type = ""
 
         for i, classified in enumerate(result.defects):  # i 用于日志定位
             x, y, w, h = classified.bbox
@@ -447,14 +467,14 @@ class Pipeline:
                 # copy 一份避免外部修改预处理图时连带改动
                 classified.crop = crop.copy()
 
-            if cls.name in self.ng_trigger_classes:
-                if classified.outer_radius > worst_ng_length:
-                    worst_ng_length = classified.outer_radius
-                    worst_ng_type = cls.name
-
-        if worst_ng_type:
+        # ── 按 per-class 规则做最终 NG 判定 ──
+        verdict = judge_per_class(result.defects, self.class_rules)
+        if verdict.is_ng:
             result.result = "NG"
             result.quality = 1
-            result.defect_type = worst_ng_type
-            # Halcon: 长度字段保存最严重 NG 缺陷的 outer_radius
-            result.max_length = float(worst_ng_length)
+            result.defect_type = verdict.ng_type
+            result.max_length = float(verdict.ng_length)
+            # 把 per-class reasons 合并到 judge_reasons，便于在 UI / 日志看
+            result.judge_reasons = list(result.judge_reasons) + [
+                f"[per-class] {r}" for r in verdict.reasons
+            ]

@@ -69,6 +69,8 @@ try:
     from ui.stats_page import StatsPage
     from ui.settings_page import SettingsPage
     from ui.log_page import LogPage
+    from ui.judge_page import JudgePage
+    from algorithm.judge import ClassRule, DEFAULT_CLASS_RULES
     from algorithm import JudgeConfig
 except ImportError as e:
     logger.critical(f"模块导入失败: {e}", exc_info=True)
@@ -293,11 +295,28 @@ class SiRodCameraApp(QObject):
         )
 
         # ── 检测引擎（取代原 TCPServer + Run.bat）──
-        # NG 触发类别（从 config 读 list[str]，转 frozenset）
+        # 旧 API：NG 触发类别（仅向后兼容；config.judge.per_class 优先）
         ng_classes_cfg = self.config.get("judge.ng_trigger_classes", None)
         ng_classes = (frozenset(ng_classes_cfg)
                        if isinstance(ng_classes_cfg, list) and ng_classes_cfg
                        else None)
+        # 新 API：每类独立规则（config.judge.per_class 是 list[dict]）
+        per_class_cfg = self.config.get("judge.per_class", None)
+        if isinstance(per_class_cfg, list) and per_class_cfg:
+            class_rules = []
+            for d in per_class_cfg:
+                if not isinstance(d, dict) or not d.get("name"):
+                    continue
+                class_rules.append(ClassRule(
+                    name=str(d.get("name")),
+                    report_ng=bool(d.get("report_ng", False)),
+                    max_area=float(d.get("max_area", 1e9)),
+                    max_length=float(d.get("max_length", 1e9)),
+                    max_count=int(d.get("max_count", 1_000_000)),
+                    min_confidence=float(d.get("min_confidence", 0.0)),
+                ))
+        else:
+            class_rules = None  # 让 Pipeline 走兼容路径
 
         # 模型路径：默认 <project>/models/，可由 config.models.seg/cls 覆盖
         default_seg = os.path.join(_PARENT_DIR, "models", "Model_seg.m")
@@ -326,6 +345,7 @@ class SiRodCameraApp(QObject):
                 max_length=float(self.config.get("judge.max_length", 2)),
             ),
             ng_trigger_classes=ng_classes,
+            class_rules=class_rules,
         )
         logger.info(f"模型路径: seg={seg_path}  cls={cls_path}")
 
@@ -367,6 +387,7 @@ class SiRodCameraApp(QObject):
         self.gallery_page = GalleryPage()
         self.stats_page = StatsPage(database=self.database)
         self.settings_page = SettingsPage(config=self.config)
+        self.judge_page = JudgePage(config=self.config)
         self.log_page = LogPage()
 
         for name, page in [
@@ -375,11 +396,18 @@ class SiRodCameraApp(QObject):
             ("gallery",  self.gallery_page),
             ("stats",    self.stats_page),
             ("settings", self.settings_page),
-            ("logs",     self.log_page),       # 顺序要跟 main_window 导航顺序对齐
+            ("judge",    self.judge_page),     # 顺序要跟 main_window 导航顺序对齐
+            ("logs",     self.log_page),
         ]:
             self.window.add_page(name, page)
-        # main_camera 模式启用「日志」导航按钮
+        # main_camera 模式启用「参数」和「日志」导航按钮
+        self.window.set_tab_visible("参数", True)
         self.window.set_tab_visible("日志", True)
+        # 保存参数后提示重启
+        try:
+            self.judge_page.settings_saved.connect(self._on_judge_settings_saved)
+        except Exception:
+            pass
         logger.info("UI 页面已注册")
 
         self.overview_page.set_shift_stats(self.shift_stats)
@@ -721,6 +749,9 @@ class SiRodCameraApp(QObject):
             self.config.save()
         except Exception as e:
             logger.error(f"保存报警开关状态失败: {e}", exc_info=True)
+
+    def _on_judge_settings_saved(self):
+        logger.warning("判定参数已变更 — 部分需重启程序生效")
 
     def _on_mes_status_updated(self, success: bool, rod_id: str, message: str):
         try:

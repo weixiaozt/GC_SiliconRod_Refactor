@@ -54,16 +54,16 @@ class MainWindow(QMainWindow):
         topbar_layout.addWidget(title)
         topbar_layout.addSpacing(30)
 
-        # 导航按钮（日志放最后，main.py 不注册则点空白；main_camera 模式会注册）
-        tab_names = ["总览", "历史记录", "缺陷图库", "统计报表", "系统设置", "日志"]
+        # 导航按钮：「参数」和「日志」放最后，默认隐藏；main_camera 模式会启用
+        tab_names = ["总览", "历史记录", "缺陷图库", "统计报表",
+                     "系统设置", "参数", "日志"]
         for i, name in enumerate(tab_names):
             btn = QPushButton(name)
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, idx=i: self._switch_page(idx))
             topbar_layout.addWidget(btn)
             self._nav_buttons.append(btn)
-            # "日志" 按钮默认隐藏，由 set_tab_visible('日志', True) 显式启用
-            if name == "日志":
+            if name in ("参数", "日志"):
                 btn.setVisible(False)
 
         topbar_layout.addStretch()

@@ -160,8 +160,12 @@ class InspectEngineConfig:
     cls_model: str = "models/Model_cls.m"
     judge_config: JudgeConfig = field(default_factory=JudgeConfig)
     ng_trigger_classes: Optional[frozenset] = None
-    """触发 NG 的分类类别集合。``None`` 用 Pipeline 默认 ({"隐裂"})。
-       可在 settings_page / config.json 用 judge.ng_trigger_classes 配置。"""
+    """旧 API（向后兼容）。如同时设 ``class_rules``，``class_rules`` 优先。"""
+
+    class_rules: Optional[list] = None
+    """新 API：每类独立 5 字段判定规则。``None`` 时由
+       ``ng_trigger_classes`` 兼容构造（默认仅"隐裂"算 NG）。
+       配置入口：``config.json`` 的 ``judge.per_class`` list[dict]。"""
 
     # 行为
     use_preprocessed_as_inspect_image: bool = True
@@ -265,6 +269,7 @@ class InspectEngine:
             self._pipeline = Pipeline(
                 cfg.seg_model, cfg.cls_model, cfg.judge_config,
                 ng_trigger_classes=cfg.ng_trigger_classes,
+                class_rules=cfg.class_rules,
             )
             logger.info("检测流水线就绪")
         except Exception as e:

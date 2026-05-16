@@ -27,6 +27,10 @@ from .judge import (
     DefectStats,
     JudgeVerdict,
     judge_by_rules,
+    ClassRule,
+    ClassJudgeVerdict,
+    judge_per_class,
+    DEFAULT_CLASS_RULES,
 )
 from .pipeline import (
     Pipeline,
@@ -48,6 +52,7 @@ __all__ = [
     "preprocess", "preprocess_with_debug", "compute_clip_threshold",
     # judge
     "JudgeConfig", "DefectStats", "JudgeVerdict", "judge_by_rules",
+    "ClassRule", "ClassJudgeVerdict", "judge_per_class", "DEFAULT_CLASS_RULES",
     # pipeline
     "Pipeline", "DetectionResult", "ClassifiedDefect", "NG_TRIGGER_CLASSES",
     # overlay

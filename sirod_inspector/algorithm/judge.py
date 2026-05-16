@@ -1,31 +1,35 @@
 """
 缺陷判定规则
 ============
-对应 Halcon Detection_process 的判定环节：
+分两阶段：
 
-  1. 先按四个阈值判定是否进入「NG 候选」分支
-        max_area      —— 单个缺陷面积上限
-        sum_area      —— 总面积上限
-        max_length    —— 单个缺陷 outer_radius（外接圆半径）上限
-        max_count     —— 缺陷个数上限
-     任一超限即进入 NG 候选。
+  阶段 1（``judge_by_rules``）：按 4 个全局阈值判定是否进入分类。
+       任一超限则进入 NG 候选 → 送分类模型。
 
-  2. 进入 NG 候选后，对每个缺陷送分类模型；只有 ``classification_name == "隐裂"``
-     才标 NG (quality=1)。其它分类（崩边 / 缺口 / 其它）记录但不报警。
-     ↑ 这部分在 pipeline.py 中实现，本模块只负责第 1 步的纯规则判定。
+  阶段 2（``judge_per_class``）：分类完成后，按每个类别独立的规则做最终 NG 判定。
+       每个类别有 5 个字段：
+         - report_ng        是否计入 NG（不计入则该类即使超阈值也不报）
+         - max_area         单个缺陷面积上限（超即 NG）
+         - max_length       单个缺陷 outer_radius 上限（超即 NG）
+         - max_count        该类缺陷个数上限（一根棒上同类超 N 个即 NG）
+         - min_confidence   分类置信度阈值（低于此值视为模型没把握，不报 NG）
 
 公开 API
 --------
-    JudgeConfig    — 4 个阈值参数
-    DefectStats    — 单个候选缺陷的统计量
-    JudgeVerdict   — 第 1 步规则判定的输出
-    judge_by_rules — 执行第 1 步规则判定
+    JudgeConfig          — 全局几何阈值（阶段 1）
+    ClassRule            — 单个类别的判定规则（阶段 2）
+    DefectStats          — 候选缺陷的几何统计量
+    JudgeVerdict         — 阶段 1 输出
+    ClassJudgeVerdict    — 阶段 2 输出
+    judge_by_rules       — 阶段 1 判定
+    judge_per_class      — 阶段 2 判定
+    DEFAULT_NG_CLASSES   — 默认 NG 类别（沿用 Halcon "隐裂" 行为）
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 
 # ============================================================
@@ -48,6 +52,131 @@ class JudgeConfig:
     sum_area:   float = 10.0     # 总面积上限
     max_count:  int = 10         # 缺陷个数上限
     max_length: float = 2.0      # 单个缺陷 outer_radius 上限
+
+
+# ============================================================
+# 阶段 2：按类别独立规则
+# ============================================================
+
+@dataclass
+class ClassRule:
+    """单个缺陷类别的判定规则。
+
+    所有字段都是「触发 NG 的上限」语义 — 超过即 NG，等于不触发。
+    """
+    name: str = ""                  # 类别名（"隐裂"/"崩边"/...）
+    report_ng: bool = False         # 是否计入 NG（False 时该类即使超阈值也不报）
+    max_area: float = 1e9           # 单个缺陷面积上限（超即 NG）
+    max_length: float = 1e9         # 单个缺陷 outer_radius 上限
+    max_count: int = 1_000_000      # 该类缺陷个数上限（同一根棒上同类超此值即 NG）
+    min_confidence: float = 0.0     # 分类置信度下限（低于此值视为模型没把握，不报 NG）
+
+
+# 沿用 Halcon 行为的默认规则：只把 "隐裂" 算 NG，其它类全部放行
+def _make_default_class_rules() -> List[ClassRule]:
+    return [
+        ClassRule(name="隐裂",
+                  report_ng=True,
+                  max_area=10.0, max_length=2.0,
+                  max_count=10, min_confidence=0.0),
+        ClassRule(name="崩边", report_ng=False),
+        ClassRule(name="其他", report_ng=False),
+        ClassRule(name="脏污", report_ng=False),
+        ClassRule(name="线痕", report_ng=False),
+        ClassRule(name="拼缝", report_ng=False),
+        ClassRule(name="OK",   report_ng=False),
+        ClassRule(name="缺口", report_ng=False),
+    ]
+
+
+DEFAULT_CLASS_RULES = _make_default_class_rules()
+
+
+@dataclass
+class ClassJudgeVerdict:
+    """阶段 2 输出：综合所有缺陷的最终 NG 判定"""
+    is_ng: bool = False
+    ng_type: str = ""               # 最严重 NG 类别的名字（按 outer_radius 最大者）
+    ng_length: float = 0.0          # 最严重 NG 的 outer_radius
+    reasons: List[str] = field(default_factory=list)
+
+
+def judge_per_class(classified_defects: list,
+                     rules: List[ClassRule]) -> ClassJudgeVerdict:
+    """阶段 2：根据每个 ClassRule 检查所有已分类缺陷，得出最终 NG 判定。
+
+    Parameters
+    ----------
+    classified_defects : list[ClassifiedDefect]
+        来自 pipeline 的已分类缺陷（含 area / outer_radius / class_name / class_confidence）。
+    rules : list[ClassRule]
+        每类的判定规则。
+
+    Returns
+    -------
+    ClassJudgeVerdict
+        ``is_ng=True`` 当至少一个缺陷触发任一规则；
+        ``ng_type`` 取最严重 NG（outer_radius 最大）的类别。
+    """
+    # 类别名 → 规则
+    rule_map: Dict[str, ClassRule] = {r.name: r for r in rules}
+
+    # 统计每类计数（用于 max_count 判定）
+    per_class_count: Dict[str, int] = {}
+    for d in classified_defects:
+        nm = d.class_name or ""
+        if not nm:
+            continue
+        per_class_count[nm] = per_class_count.get(nm, 0) + 1
+
+    reasons: List[str] = []
+    worst_length = -1.0
+    worst_type = ""
+
+    # max_count 类别级判定
+    for cls_name, cnt in per_class_count.items():
+        rule = rule_map.get(cls_name)
+        if not rule or not rule.report_ng:
+            continue
+        if cnt > rule.max_count:
+            reasons.append(
+                f"{cls_name} 数量={cnt} > {rule.max_count}"
+            )
+            # 找该类置信度最高的缺陷作为代表
+            for d in classified_defects:
+                if d.class_name == cls_name and d.outer_radius > worst_length:
+                    worst_length = d.outer_radius
+                    worst_type = cls_name
+
+    # 单缺陷级判定
+    for d in classified_defects:
+        nm = d.class_name or ""
+        rule = rule_map.get(nm)
+        if not rule or not rule.report_ng:
+            continue
+        if d.class_confidence < rule.min_confidence:
+            continue   # 模型没把握，不报
+        triggered = False
+        if d.area > rule.max_area:
+            reasons.append(
+                f"{nm} area={d.area} > {rule.max_area:.0f}"
+            )
+            triggered = True
+        if d.outer_radius > rule.max_length:
+            reasons.append(
+                f"{nm} length={d.outer_radius:.1f} > {rule.max_length:.1f}"
+            )
+            triggered = True
+        if triggered and d.outer_radius > worst_length:
+            worst_length = d.outer_radius
+            worst_type = nm
+
+    return ClassJudgeVerdict(
+        is_ng=bool(reasons),
+        ng_type=worst_type,
+        ng_length=max(0.0, worst_length),
+        reasons=reasons,
+    )
 
 
 @dataclass
