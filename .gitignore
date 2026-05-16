@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+tests/outputs/
+tests/_diag*.txt
+*.log
+logs/
+.venv/
+源码备份/
