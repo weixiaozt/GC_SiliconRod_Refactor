@@ -54,14 +54,17 @@ class MainWindow(QMainWindow):
         topbar_layout.addWidget(title)
         topbar_layout.addSpacing(30)
 
-        # 导航按钮
-        tab_names = ["总览", "历史记录", "缺陷图库", "统计报表", "系统设置"]
+        # 导航按钮（日志放最后，main.py 不注册则点空白；main_camera 模式会注册）
+        tab_names = ["总览", "历史记录", "缺陷图库", "统计报表", "系统设置", "日志"]
         for i, name in enumerate(tab_names):
             btn = QPushButton(name)
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, idx=i: self._switch_page(idx))
             topbar_layout.addWidget(btn)
             self._nav_buttons.append(btn)
+            # "日志" 按钮默认隐藏，由 set_tab_visible('日志', True) 显式启用
+            if name == "日志":
+                btn.setVisible(False)
 
         topbar_layout.addStretch()
 
@@ -161,6 +164,13 @@ class MainWindow(QMainWindow):
 
     def update_recv_count(self, count):
         self._recv_label.setText(f"已接收: {count}")
+
+    def set_tab_visible(self, name: str, visible: bool):
+        """显示/隐藏顶部某个导航按钮（按钮文字匹配 name）"""
+        for btn in self._nav_buttons:
+            if btn.text() == name:
+                btn.setVisible(visible)
+                break
 
     def set_line_id(self, line_id: str):
         self._line_label.setText(f"产线 {line_id}")

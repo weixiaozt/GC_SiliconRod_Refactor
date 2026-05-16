@@ -199,7 +199,7 @@ class InspectEngine:
                  config: Optional[InspectEngineConfig] = None,
                  *,
                  rod_id_provider: Optional[Callable[[], str]] = None,
-                 on_inspect: Optional[Callable[[InspectData], None]] = None,
+                 on_inspect: Optional[Callable] = None,
                  on_error: Optional[Callable[[Exception], None]] = None):
         """
         Parameters
@@ -208,8 +208,16 @@ class InspectEngine:
             运行配置。``None`` 时使用默认值。
         rod_id_provider : Callable[[], str]
             返回当前棒号的回调。默认返回 ``"NoRead"``（无扫码场景）。
-        on_inspect : Callable[[InspectData], None]
+        on_inspect : Callable
             每次检测完成后的回调。在工作线程上调用。
+
+            兼容两种签名（按参数个数自动判别）：
+
+            - ``on_inspect(InspectData)`` — 旧签名，只拿对外契约数据
+            - ``on_inspect(InspectData, DetectionResult)`` — 新签名，
+              额外拿到 algorithm 层完整结果（含 label_map / crops），
+              用于落盘 marked 大图、按类别归档 crop 等场景
+
         on_error : Callable[[Exception], None]
             异常回调；不抛出，避免 run_loop 静默卡死。
         """
@@ -327,8 +335,14 @@ class InspectEngine:
             )
 
             # 3) Pipeline — preprocess 由内部按 dtype 自动判别
+            #    keep_label_map + keep_crops + keep_raw_input 都开，便于
+            #    on_inspect 回调存档全部 4 类图（含 TIF 原图 + WebImage）
             result = self._pipeline.process(
-                frame, keep_processed_image=True,
+                frame,
+                keep_processed_image=True,
+                keep_crops=True,
+                keep_label_map=True,
+                keep_raw_input=True,
             )
 
             # 4) 装配 InspectData
@@ -344,9 +358,20 @@ class InspectEngine:
                 raw_frame=raw_frame_for_inspect,
             )
 
-            # 5) 回调
+            # 5) 回调 — 兼容 1 参数和 2 参数两种签名
             try:
-                self.on_inspect(data)
+                import inspect as _inspect
+                try:
+                    sig = _inspect.signature(self.on_inspect)
+                    n_params = len([p for p in sig.parameters.values()
+                                     if p.kind in (p.POSITIONAL_ONLY,
+                                                    p.POSITIONAL_OR_KEYWORD)])
+                except (ValueError, TypeError):
+                    n_params = 1
+                if n_params >= 2:
+                    self.on_inspect(data, result)
+                else:
+                    self.on_inspect(data)
             except Exception as cb_e:
                 logger.error(f"on_inspect 回调异常: {cb_e}", exc_info=True)
 

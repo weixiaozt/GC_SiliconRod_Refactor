@@ -34,6 +34,11 @@ from .pipeline import (
     ClassifiedDefect,
     NG_TRIGGER_CLASSES,
 )
+from .overlay import (
+    draw_marked_full,
+    draw_marked_crop,
+    color_for_label,
+)
 
 __all__ = [
     # inference
@@ -45,4 +50,6 @@ __all__ = [
     "JudgeConfig", "DefectStats", "JudgeVerdict", "judge_by_rules",
     # pipeline
     "Pipeline", "DetectionResult", "ClassifiedDefect", "NG_TRIGGER_CLASSES",
+    # overlay
+    "draw_marked_full", "draw_marked_crop", "color_for_label",
 ]

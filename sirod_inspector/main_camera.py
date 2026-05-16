@@ -22,6 +22,7 @@ import sys
 import os
 import datetime
 import threading
+import time
 import traceback
 
 # ── 路径设置 ──
@@ -67,6 +68,7 @@ try:
     from ui.gallery_page import GalleryPage
     from ui.stats_page import StatsPage
     from ui.settings_page import SettingsPage
+    from ui.log_page import LogPage
     from algorithm import JudgeConfig
 except ImportError as e:
     logger.critical(f"模块导入失败: {e}", exc_info=True)
@@ -74,6 +76,149 @@ except ImportError as e:
     print("请确保已安装所有依赖: "
           "pip install PyQt6 numpy Pillow pymysql matplotlib openpyxl requests pyserial opencv-python")
     sys.exit(1)
+
+
+def save_inspect_images(data: InspectData, detection_result,
+                         *,
+                         base_dir: str,
+                         ng_trigger_classes: set = None,
+                         raw_tif_dir: str = "D:/SiRod/ImageRaw",
+                         web_image_dir: str = "D:/SiRod/WebImage",
+                         web_url_base: str = "") -> dict:
+    """把一次检测的所有图落盘。可独立调用（不依赖 SiRodCameraApp）。
+
+    存图清单::
+
+        <base_dir>/<date>/full/raw/<OK|NG>/<stem>.bmp        # 干净大图（训练用）
+        <base_dir>/<date>/full/marked/<OK|NG>/<stem>.png     # 叠 mask 大图
+        <base_dir>/<date>/crops/raw/<stem>_d<i>_<类别>.bmp   # 干净小图
+        <base_dir>/<date>/crops/marked/<stem>_d<i>_<类别>.png # 叠 mask 小图
+
+        <raw_tif_dir>/<stem>.tif                              # 原始 uint16 大图（每根棒）
+        <web_image_dir>/<stem>.png                            # 给 MES 的带标注图（仅 NG）
+
+    其中 ``stem = <棒号>_<HHMMSS_microseconds>``。
+
+    Returns
+    -------
+    dict
+        ``full_raw`` / ``full_marked`` / ``crop_raw`` / ``crop_marked`` /
+        ``crops_count`` / ``raw_tif`` / ``web_image`` / ``web_url``。
+        失败/未跑某项时 key 不会存在。
+    """
+    import cv2
+    from sirod_inspector.algorithm import draw_marked_full, draw_marked_crop
+
+    paths: dict = {}
+    if data.image is None:
+        return paths
+
+    if ng_trigger_classes is None:
+        ng_trigger_classes = {"隐裂"}
+
+    today = datetime.date.today().isoformat()
+    ts = datetime.datetime.now().strftime("%H%M%S_%f")
+    stem = f"{(data.rod_id or 'NoRead')}_{ts}"
+
+    def _imwrite(path, img, ext):
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        ok, buf = cv2.imencode(ext, img)
+        if not ok:
+            return False
+        with open(path, "wb") as f:
+            f.write(buf.tobytes())
+        return True
+
+    try:
+        # 0. TIF 原图（uint16，对应 Halcon D:/SiRod/ImageRaw/）
+        #    优先用 detection_result.raw_input_image；没有时退回 data.image
+        raw_for_tif = None
+        if detection_result is not None and detection_result.raw_input_image is not None:
+            raw_for_tif = detection_result.raw_input_image
+        if raw_for_tif is not None:
+            tif_path = os.path.join(raw_tif_dir, f"{stem}.tif")
+            if _imwrite(tif_path, raw_for_tif, ".tif"):
+                paths['raw_tif'] = tif_path
+
+        # 1. full / raw
+        full_raw_path = os.path.join(
+            base_dir, today, "full", "raw", data.result, f"{stem}.bmp")
+        if _imwrite(full_raw_path, data.image, ".bmp"):
+            paths['full_raw'] = full_raw_path
+
+        # 2. full / marked
+        if detection_result is not None:
+            marked = draw_marked_full(
+                detection_result.processed_image
+                    if detection_result.processed_image is not None
+                    else data.image,
+                detection_result.label_map,
+                detection_result.defects,
+                detection_result.seg_class_names,
+                ng_trigger_classes=ng_trigger_classes,
+            )
+            full_marked_path = os.path.join(
+                base_dir, today, "full", "marked",
+                data.result, f"{stem}.png")
+            if _imwrite(full_marked_path, marked, ".png"):
+                paths['full_marked'] = full_marked_path
+
+        # 3. crops（每个缺陷 raw + marked，类别写在文件名里）
+        if detection_result is not None and detection_result.defects:
+            count = 0
+            for i, d in enumerate(detection_result.defects):
+                if d.crop is None:
+                    continue
+                cls_name = (d.class_name or "未分类").strip() or "未分类"
+                safe_cls = cls_name
+                for ch in r'<>:"/\|?*':
+                    safe_cls = safe_cls.replace(ch, "_")
+
+                crop_raw_path = os.path.join(
+                    base_dir, today, "crops", "raw",
+                    f"{stem}_d{i:02d}_{safe_cls}.bmp")
+                if _imwrite(crop_raw_path, d.crop, ".bmp"):
+                    paths['crop_raw'] = crop_raw_path
+
+                marked_crop = draw_marked_crop(d.crop, d)
+                crop_marked_path = os.path.join(
+                    base_dir, today, "crops", "marked",
+                    f"{stem}_d{i:02d}_{safe_cls}.png")
+                if _imwrite(crop_marked_path, marked_crop, ".png"):
+                    paths['crop_marked'] = crop_marked_path
+                count += 1
+            paths['crops_count'] = count
+
+        # 4. WebImage — 仅 NG 存，给 MES 用，名字加 HTTP URL 写到 raw_json
+        if data.result == "NG" and 'full_marked' in paths:
+            # 复用 full/marked 那张图（同样的标注），单独放一份到 WebImage 目录
+            try:
+                import shutil
+                web_path = os.path.join(web_image_dir, f"{stem}.png")
+                d_ = os.path.dirname(web_path)
+                if d_:
+                    os.makedirs(d_, exist_ok=True)
+                shutil.copyfile(paths['full_marked'], web_path)
+                paths['web_image'] = web_path
+                if web_url_base:
+                    paths['web_url'] = (web_url_base.rstrip("/") + "/"
+                                          + f"{stem}.png")
+            except Exception as e:
+                logger.warning(f"WebImage 复制失败: {e}")
+
+        logger.info(
+            f"图像已保存 ({len(paths)} 类): "
+            f"tif={'✓' if 'raw_tif' in paths else '✗'} "
+            f"full_raw={'✓' if 'full_raw' in paths else '✗'} "
+            f"full_marked={'✓' if 'full_marked' in paths else '✗'} "
+            f"crops={paths.get('crops_count', 0)} "
+            f"web={'✓' if 'web_image' in paths else '✗'}"
+        )
+    except Exception as e:
+        logger.error(f"保存图像失败: {e}", exc_info=True)
+    return paths
 
 
 class SiRodCameraApp(QObject):
@@ -117,6 +262,20 @@ class SiRodCameraApp(QObject):
 
         # MES
         self.http_client = MesHttpClient(self.config)
+
+        # ── Watchdog 状态（_update_status 定时刷新）──
+        self._wd_last_count = 0
+        self._wd_last_change_at = time.time()
+        # 长时间没新检测仅显示"等待触发"轻提示，不算异常
+        # （现场可能 30s 都没棒经过 — 这是正常等待）
+        self._wd_idle_threshold_s = float(
+            self.config.get("watchdog.idle_threshold_s", 30.0))
+        # 真异常窗口：on_error 触发后 N 秒内仍标红
+        self._wd_error_window_s = float(
+            self.config.get("watchdog.error_window_s", 10.0))
+        self._wd_last_error_at: float = 0.0
+        self._wd_last_error_msg: str = ""
+        self._wd_warned_scanner = False     # 防 log 刷屏
 
         # ── 扫码枪客户端 ──
         scanner_host = self.config.get("scanner.host", "192.168.12.56")
@@ -188,7 +347,7 @@ class SiRodCameraApp(QObject):
             engine_cfg,
             rod_id_provider=_rod_id_provider,
             on_inspect=self._on_inspect_data,   # 工作线程
-            on_error=lambda e: logger.error(f"InspectEngine: {e}"),
+            on_error=self._on_engine_error,
         )
         logger.info(
             f"检测引擎配置: judge={engine_cfg.judge_config}, "
@@ -208,6 +367,7 @@ class SiRodCameraApp(QObject):
         self.gallery_page = GalleryPage()
         self.stats_page = StatsPage(database=self.database)
         self.settings_page = SettingsPage(config=self.config)
+        self.log_page = LogPage()
 
         for name, page in [
             ("overview", self.overview_page),
@@ -215,8 +375,11 @@ class SiRodCameraApp(QObject):
             ("gallery",  self.gallery_page),
             ("stats",    self.stats_page),
             ("settings", self.settings_page),
+            ("logs",     self.log_page),       # 顺序要跟 main_window 导航顺序对齐
         ]:
             self.window.add_page(name, page)
+        # main_camera 模式启用「日志」导航按钮
+        self.window.set_tab_visible("日志", True)
         logger.info("UI 页面已注册")
 
         self.overview_page.set_shift_stats(self.shift_stats)
@@ -253,6 +416,22 @@ class SiRodCameraApp(QObject):
         self._shift_timer = QTimer()
         self._shift_timer.timeout.connect(self._check_shift_reset)
         self._shift_timer.start(30_000)
+
+        # 底部状态灯 tooltip — main_camera 模式下灯的语义跟 main.py 不同，
+        # 复用同一组位置但加 tooltip 说明
+        try:
+            tip = {
+                "TCP":     "数据源/检测引擎在线状态",
+                "Run.bat": "检测循环在持续触发（绿）/ 已停止（红）",
+                "飞书":     "扫码枪连接状态（main_camera 模式复用此灯）",
+                "数据库":   "MySQL 数据库连接",
+                "报警灯":   "串口报警灯连接",
+            }
+            for name, t in tip.items():
+                if name in self.window._status_labels:
+                    self.window._status_labels[name].setToolTip(t)
+        except Exception:
+            pass
 
         logger.info("应用控制器初始化完成")
 
@@ -329,6 +508,12 @@ class SiRodCameraApp(QObject):
         except Exception as e:
             logger.error(f"保存统计数据失败: {e}", exc_info=True)
 
+        # 摘掉 LogPage 的 logging handler，避免关程序时还接日志报错
+        try:
+            self.log_page.detach()
+        except Exception:
+            pass
+
         for name, svc, method in [
             ("检测引擎", self.engine, "stop"),
             ("扫码枪",   self.scanner, "stop"),
@@ -356,13 +541,20 @@ class SiRodCameraApp(QObject):
             self.overview_page.shift_reset_signal.emit()
 
     # ─────────── 检测数据回调 ───────────
-    def _on_inspect_data(self, data: InspectData):
-        """工作线程上：仅做日志和信号转发"""
+    def _on_inspect_data(self, data: InspectData, detection_result=None):
+        """工作线程上：仅做日志和信号转发。
+
+        ``detection_result`` 是 algorithm 层完整产物（含 label_map / crops），
+        通过 InspectEngine 传过来。本地通过临时 attribute 挂到 data 上，
+        让 UI 线程的 ``_handle_inspect_data`` 能拿到（不污染对外契约）。
+        """
         logger.info(
             f"检测完成: rod_id={data.rod_id}, result={data.result}, "
             f"defect_type={data.defect_type}, defect_count={data.defect_count}, "
             f"ct={data.ct*1000:.0f}ms"
         )
+        # 临时挂载完整 result（非 InspectData 正式字段，仅本进程内传递）
+        data._detection_result = detection_result
         self._inspect_data_signal.emit(data)
 
     def _handle_inspect_data(self, data: InspectData):
@@ -414,7 +606,13 @@ class SiRodCameraApp(QObject):
 
                 image_path = None
                 if data.image is not None and app.config.get("image_store.enabled", False):
-                    image_path = app._save_image(data)
+                    paths = app._save_images(data, getattr(data, '_detection_result', None))
+                    # 数据库 / 图库用 marked 大图本地路径
+                    image_path = paths.get('full_marked') or paths.get('full_raw')
+                    # MES 上传 用 WebImage 的 HTTP URL（仅 NG 才有）
+                    web_url = paths.get('web_url')
+                    if web_url and isinstance(data.raw_json, dict):
+                        data.raw_json['图片路径'] = web_url
                     if image_path and data.result == "NG":
                         try:
                             app.gallery_page.update_image(data.rod_id, image_path)
@@ -532,38 +730,96 @@ class SiRodCameraApp(QObject):
             logger.error(f"更新 MES 状态标签失败: {e}", exc_info=True)
 
     def set_rod_id(self, rod_id: str) -> None:
-        """外部（扫码枪等）注入当前棒号"""
+        """外部手动注入棒号（在扫码枪未启用 / 离线时使用）"""
         with self._rod_id_lock:
-            self._latest_rod_id = rod_id or "NoRead"
+            self._manual_rod_id = rod_id or "NoRead"
 
+    def _save_images(self, data: InspectData, detection_result) -> dict:
+        """存全部图（包装函数 — 真正逻辑在 module-level ``save_inspect_images``）"""
+        base_dir = self.config.get("image_store.base_dir", "D:/SiRod/images")
+        raw_tif_dir = self.config.get("image_store.raw_tif_dir", "D:/SiRod/ImageRaw")
+        web_image_dir = self.config.get("image_store.web_image_dir", "D:/SiRod/WebImage")
+        web_url_base = self.config.get("image_store.web_url_base",
+                                         "http://10.32.50.220:8080")
+        ng_cls_cfg = self.config.get("judge.ng_trigger_classes", None)
+        ng_set = (set(ng_cls_cfg)
+                   if isinstance(ng_cls_cfg, list) and ng_cls_cfg
+                   else {"隐裂"})
+        return save_inspect_images(
+            data, detection_result,
+            base_dir=base_dir,
+            ng_trigger_classes=ng_set,
+            raw_tif_dir=raw_tif_dir,
+            web_image_dir=web_image_dir,
+            web_url_base=web_url_base,
+        )
+
+    # 保留旧名兼容：内部仍用 _save_images
     def _save_image(self, data: InspectData):
-        try:
-            base_dir = self.config.get("image_store.base_dir", "D:/SiRod/images")
-            today = datetime.date.today().isoformat()
-            result_dir = os.path.join(base_dir, today, data.result)
-            os.makedirs(result_dir, exist_ok=True)
+        """兼容名：等价 ``_save_images(data, None)``，只存大图 raw"""
+        paths = self._save_images(data, None)
+        return paths.get('full_marked') or paths.get('full_raw')
 
-            ts = datetime.datetime.now().strftime("%H%M%S_%f")
-            filename = f"{data.rod_id}_{ts}.png"
-            filepath = os.path.join(result_dir, filename)
-
-            from PIL import Image
-            img = Image.fromarray(data.image)
-            img.save(filepath)
-            logger.info(f"图像已保存: {filepath}")
-            return filepath
-        except Exception as e:
-            logger.error(f"保存图像失败: {e}", exc_info=True)
-            return None
+    def _on_engine_error(self, e: Exception) -> None:
+        """InspectEngine 工作线程上报异常时调用"""
+        self._wd_last_error_at = time.time()
+        self._wd_last_error_msg = f"{type(e).__name__}: {e}"[:80]
+        logger.error(f"InspectEngine 异常: {e}", exc_info=False)
 
     def _update_status(self):
-        """定时刷新底部状态栏"""
-        # 复用 main.py 的状态灯位置（数据源/Run.bat 现在代表相机/引擎）
-        self.window.set_device_status("TCP", self.engine.is_running)
-        self.window.set_device_status("Run.bat", self.engine.is_looping)
+        """定时刷新底部状态栏 + watchdog 检查。
+
+        状态徽章优先级（高到低）::
+
+            红:  引擎离线 / 检测异常（近 N 秒有 on_error）
+            橙:  检测循环已停 / 扫码枪离线
+            蓝:  等待触发（正常空闲）
+            绿:  运行中
+        """
+        engine_running = self.engine.is_running
+        engine_looping = self.engine.is_looping
+        self.window.set_device_status("TCP", engine_running)
+        self.window.set_device_status("Run.bat", engine_looping)
         self.window.update_recv_count(self.engine.inspect_count)
         self.window.set_device_status("数据库", self.database.is_connected)
         self.window.set_device_status("报警灯", self.serial_manager.is_open)
+        scanner_ok = (self.scanner is not None
+                       and self.scanner.is_connected)
+        self.window.set_device_status("飞书", scanner_ok)
+
+        now = time.time()
+        current_count = self.engine.inspect_count
+        if current_count != self._wd_last_count:
+            self._wd_last_count = current_count
+            self._wd_last_change_at = now
+
+        silent_s = now - self._wd_last_change_at
+        error_age = now - self._wd_last_error_at if self._wd_last_error_at else 9e9
+        recent_error = error_age < self._wd_error_window_s
+
+        # 强提示（异常）
+        if not engine_running:
+            self.window.set_status_badge("引擎离线", "#e74c3c")
+        elif recent_error:
+            self.window.set_status_badge(
+                f"检测异常 {int(error_age)}s 前", "#e74c3c")
+        elif not engine_looping:
+            self.window.set_status_badge("检测循环已停", "#e67e22")
+        elif self.scanner is not None and not scanner_ok:
+            self.window.set_status_badge("扫码枪离线", "#e67e22")
+            if not self._wd_warned_scanner:
+                logger.warning(
+                    f"扫码枪 {self.scanner.host}:{self.scanner.port} 未连接"
+                )
+                self._wd_warned_scanner = True
+        # 轻提示（正常状态）
+        elif silent_s > self._wd_idle_threshold_s:
+            self.window.set_status_badge(
+                f"等待触发 {int(silent_s)}s", "#3498db")
+            # 不 log，空闲是正常状态
+        else:
+            self.window.set_status_badge("运行中", "#27ae60")
+            self._wd_warned_scanner = False
 
 
 def _global_exception_handler(exc_type, exc_value, exc_tb):

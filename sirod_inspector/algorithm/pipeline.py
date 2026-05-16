@@ -108,7 +108,10 @@ class DetectionResult:
     max_length: float = 0.0           # = max(outer_radius)
 
     processed_image: Optional[np.ndarray] = None       # 预处理后图（1024x3072 uint8）
+    raw_input_image: Optional[np.ndarray] = None       # 原始输入图（uint16 15000x1024，未预处理）
+    label_map: Optional[np.ndarray] = None             # seg 模型输出的像素级 label map（仅 keep_label_map=True 时填充）
     defects: List[ClassifiedDefect] = field(default_factory=list)
+    seg_class_names: List[str] = field(default_factory=list)  # seg 模型的类别表（画 mask 时用）
 
     ct_ms: float = 0.0                # 检测耗时 ms
     judge_reasons: List[str] = field(default_factory=list)
@@ -181,7 +184,9 @@ class Pipeline:
 
     def process(self, image_uint16: np.ndarray,
                 *, keep_processed_image: bool = True,
-                keep_crops: bool = False) -> DetectionResult:
+                keep_crops: bool = False,
+                keep_label_map: bool = False,
+                keep_raw_input: bool = False) -> DetectionResult:
         """一根棒子从原图到判定结果的端到端处理。
 
         Parameters
@@ -191,10 +196,11 @@ class Pipeline:
             会跳过预处理直接进入推理（按 dtype 判断）。
         keep_processed_image : bool
             是否在 ``DetectionResult.processed_image`` 中返回预处理后图。
-            生产环境为减少内存可关闭。
         keep_crops : bool
             是否在每个 ``ClassifiedDefect.crop`` 中保存送给分类模型的小图。
-            调试时打开方便复盘；生产环境关闭节省内存。
+        keep_label_map : bool
+            是否在 ``DetectionResult.label_map`` 中保存 seg 输出的像素级标签图。
+            用于画 mask 可视化或导出训练 mask；不需要可视化时关闭省内存。
 
         Returns
         -------
@@ -228,6 +234,10 @@ class Pipeline:
             sum_area=verdict.sum_area,
             max_length=verdict.max_length,
             processed_image=processed if keep_processed_image else None,
+            raw_input_image=(image_uint16 if keep_raw_input
+                              and image_uint16.dtype != np.uint8 else None),
+            label_map=label_map.copy() if keep_label_map else None,
+            seg_class_names=list(seg.class_names) if keep_label_map else [],
             defects=[ClassifiedDefect(
                 bbox=d.bbox, area=d.area, outer_radius=d.outer_radius,
             ) for d in merged_defects],
