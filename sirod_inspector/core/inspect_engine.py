@@ -221,6 +221,7 @@ class InspectEngine:
         self._camera: Optional[BVCamera] = None
         self._pipeline: Optional[Pipeline] = None
         self._inspect_id_counter = 0
+        self._counter_lock = threading.Lock()
         self._started = False
 
         # 运行循环控制
@@ -331,14 +332,15 @@ class InspectEngine:
             )
 
             # 4) 装配 InspectData
-            self._inspect_id_counter += 1
+            with self._counter_lock:
+                self._inspect_id_counter += 1
+                inspect_id = self._inspect_id_counter
             raw_frame_for_inspect = (
                 None if self.config.use_preprocessed_as_inspect_image
                 else frame
             )
             data = detection_to_inspect_data(
-                result, rod_id=rod_id,
-                inspect_id=self._inspect_id_counter,
+                result, rod_id=rod_id, inspect_id=inspect_id,
                 raw_frame=raw_frame_for_inspect,
             )
 
@@ -423,4 +425,5 @@ class InspectEngine:
 
     @property
     def inspect_count(self) -> int:
-        return self._inspect_id_counter
+        with self._counter_lock:
+            return self._inspect_id_counter

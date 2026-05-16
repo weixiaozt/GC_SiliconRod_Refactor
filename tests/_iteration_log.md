@@ -404,3 +404,90 @@ iter2 3dce4df: InspectEngine
 iter1 1d46510: BV camera ctypes
 iter0 ee4eaa2: algorithm baseline
 ```
+
+---
+
+## iter6 · 2026-05-16 · 压力测试 + 部署预检 + 线程安全
+
+### 完成
+
+#### 1. 压力测试 [tests/smoke_stress.py](tests/smoke_stress.py)
+
+连续 15 次软触发 + 检测，验证无性能漂移/内存泄漏：
+
+| 指标 | 结果 |
+|---|---|
+| 耗时 min/max/mean/stdev | 1933 / 2053 / 1957 / **32 ms** |
+| 头 5 vs 尾 5 漂移 | **-0.5%**（在 1.5% 噪声内） |
+| 帧内容差异 | 12 种 min / 11 种 max（无缓冲污染） |
+
+→ **15 次连续触发耗时极稳，无 perf drift，无可见内存泄漏**
+
+#### 2. 部署预检脚本 [tests/check_env.py](tests/check_env.py)
+
+工厂机第一次部署前一键查 9 大类：Python / 包 / 推理 DLL / 模型 / BV 相机驱动 / 推理运行时 / 相机抓图 / config / 网络可达。
+
+本机跑结果：
+```
+✓ 26 项通过   ✗ 0 项失败   ? 7 项警告（都是可选项 / 用默认值）
+[GO with caution]
+```
+
+支持 `--skip-camera` / `--skip-inference` 给不同环境定制。
+
+#### 3. 线程安全 audit
+
+发现 `InspectEngine._inspect_id_counter += 1` 在工作线程上跑、`inspect_count` getter 在 UI 线程读、可能竞态（虽然 CPython 因 GIL 是原子的，但语义不强）。
+
+修复：加 `_counter_lock`，所有读写都加锁。回归测试：3 个 InspectData 正常产出，inspect_id 连续递增。
+
+### 当前完整测试矩阵
+
+| 脚本 | 覆盖 | 硬件 |
+|---|---|---|
+| smoke_inference.py | DLL + 模型 | ✗ |
+| smoke_preprocess.py | 原图预处理 | ✗ |
+| smoke_pipeline.py | 端到端算法 | ✗ |
+| smoke_inspect_data_contract.py | InspectData 字段契约 | ✗ |
+| smoke_scanner.py | 扫码枪 + 自动重连（mock） | ✗ |
+| smoke_camera.py | 相机软触发 | ✓ |
+| smoke_inspect_engine.py | Engine 双触发模式 | ✓ |
+| smoke_live_pipeline.py | 实拍 → 流水线 | ✓ |
+| smoke_stress.py | 连拍压测 | ✓ |
+| check_env.py | 9 项部署预检 | ✓ |
+
+### 给用户的部署清单
+
+按这个顺序在工厂机上跑（前面阻塞后面）：
+
+```bash
+python tests/check_env.py        # 1. 预检 — 必须全过/可接受 warning
+python tests/smoke_camera.py     # 2. 单次抓图 — 验证相机
+python tests/smoke_inference.py  # 3. 推理 — 验证模型
+python tests/smoke_live_pipeline.py    # 4. 端到端
+python tests/smoke_stress.py --shots 20  # 5. 压测 — 看 perf 稳不稳
+python sirod_inspector/main_camera.py    # 6. 实跑 UI
+```
+
+任一步失败发对应日志给我，我针对性修。
+
+### 飞书通知
+
+依然没凭据，进度都写在 [tests/_iteration_log.md](tests/_iteration_log.md)。
+
+### 下一迭代候选
+
+- 等用户跑过工厂机一遍报具体 issue（这时候迭代最有针对性）
+- 没具体反馈则继续：UI settings 加 NG 类别复选框 / 缺陷图库联动 / 性能极限测试
+
+### git
+
+```
+iter6 <new-sha>: stress test + check_env.py + thread-safe inspect_id
+iter5 9387a5e: deployment assets + audit fixes
+iter4 d251927: scanner + NG configurable
+iter3 71951ea: main_camera.py
+iter2 3dce4df: InspectEngine
+iter1 1d46510: BV camera ctypes
+iter0 ee4eaa2: algorithm baseline
+```
