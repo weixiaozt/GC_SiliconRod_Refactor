@@ -1,0 +1,56 @@
+{
+    "tcp": {
+        "host": "127.0.0.1",
+        "port": 3000
+    },
+    "database": {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "user": "root",
+        "password": "123456",
+        "database": "b_xmartsql",
+        "table": "squarstickresult"
+    },
+    "feishu": {
+        "enabled": false,
+        "app_id": "",
+        "app_secret": "",
+        "table_id": "",
+        "base_url": "https://open.feishu.cn/open-apis"
+    },
+    "image_store": {
+        "enabled": true,
+        "base_dir": "D:/SiRod/images"
+    },
+    "shift": {
+        "reset_times": [
+            "08:00",
+            "20:00"
+        ]
+    },
+    "line_id": "PV-B02",
+    "serial": {
+        "enabled": true,
+        "port": "COM3",
+        "baudrate": 9600,
+        "timeout": 1,
+        "ng_signal": "A0 00 01 CC",
+        "reset_signal": "A0 00 00 CC"
+    },
+    "alarm": {
+        "enabled": true
+    },
+    "http": {
+        "enabled": true,
+        "url": "http://10.31.20.29/MesAPI/Api/WMSToMESByProcedure",
+        "timeout": 10,
+        "head": {
+            "DEST_SYSTEM": "YC01MES",
+            "INTF_ID": "QPMES201",
+            "SRC_SYSTEM": "YinLieJianCe",
+            "SRC_MSGID": "",
+            "BACKUP1": "QPMES201_CryptoschisisDataEM",
+            "BACKUP2": "GRZ"
+        }
+    }
+}
