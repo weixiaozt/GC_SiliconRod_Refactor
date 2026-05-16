@@ -297,13 +297,29 @@ class InspectEngine:
 
     def stop(self) -> None:
         """停止运行循环 + 关闭相机 + 释放模型。幂等。"""
-        # 停掉 run_loop
+        # 1) 通知 loop 停止
         self._loop_stop.set()
+
+        # 2) 主动 ImageStop + ImageReqAbortAll 唤醒可能阻塞在 ImageComplete
+        #    的 trigger_and_grab（默认 grab_timeout_ms=10000，相机异常时
+        #    会一直阻塞到超时）。不做这步则 stop 必然 join 10s 才返回，
+        #    且关程序时可能正赶上 close camera 撞 in-flight grab → crash。
+        #    BVCamera.stop 自身 idempotent，跨线程调用 BVCAM_ImageReqAbortAll
+        #    是 SDK 显式允许的（其设计就是给外部线程取消用）。
+        if self._camera is not None:
+            try:
+                self._camera.stop()
+            except Exception as e:
+                logger.warning(f"中断相机采集流异常（忽略）: {e}")
+
+        # 3) 等 loop 退出
         if self._loop_thread and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=10.0)
+            if self._loop_thread.is_alive():
+                logger.warning("loop 线程超时未退出，强行继续清理")
         self._loop_thread = None
 
-        # 释放硬件
+        # 4) 释放硬件
         self._cleanup_partial()
         self._started = False
         logger.info("InspectEngine 已停止")

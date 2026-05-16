@@ -789,8 +789,16 @@ class BVCamera:
                 f"ImageReq 失败: {_last_error_msg(self._dll)}"
             )
 
-        # 2) 软触发
-        self.execute("TriggerSoftware")
+        # 2) 软触发 — 失败要 abort pending request，否则下次 ImageReq 会拿到
+        #    上次的 stale frame 或者直接挂
+        try:
+            self.execute("TriggerSoftware")
+        except BVCameraError:
+            try:
+                self._dll.BVCAM_ImageReqAbortAll(self._h_camera)
+            except Exception:
+                pass
+            raise
 
         # 3) 等待完成（timeout_ms=-1 表示无限等）
         rtn = self._dll.BVCAM_ImageComplete(
