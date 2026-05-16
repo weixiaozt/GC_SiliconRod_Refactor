@@ -42,30 +42,35 @@ from sirod_inspector.core.inspect_engine import detection_to_inspect_data
 # 期望值表（按 iter4 + iter5 已固化的行为）
 # ============================================================
 
-# 注：分类 confidence 不是稳定值，模型可能有微小浮动；只断言类别，不断言精确 conf
+# 这组期望值反映 iter7+ 行为（正方形 crop + per-class judge + 默认仅"隐裂"报NG）。
+# 矩形 crop 时期 0581/1dab 会被分类为「隐裂」→ NG，但用户在 iter7 选择保留
+# 正方形 crop（"以后训练用正方形"），分类结果不同，这两张退到 OK。
+# 注：分类 confidence 不是稳定值，只断言类别，不断言精确 conf
 EXPECTED = [
     {
         "file":        "0561.bmp",
         "result":      "OK",
-        "defect_type": "",                # 非 NG 触发类别 → 不上报类型
-        "min_count":   1,                  # 至少检出 1 个候选
-        "expected_classes": {"其他"},      # cls 应分到这些
-        "min_max_area": 1000,              # max_area 应 > 1000
+        "defect_type": "",
+        "min_count":   1,
+        "expected_classes": {"其他"},
+        "min_max_area": 1000,
     },
     {
         "file":        "0581.bmp",
-        "result":      "NG",
-        "defect_type": "隐裂",
+        # 正方形 crop 下分类结果是「脏污」+「其他」，两类都非 NG 触发 → OK
+        "result":      "OK",
+        "defect_type": "",
         "min_count":   2,
-        "expected_classes": {"隐裂", "脏污", "其他"},  # 任一即可
+        "expected_classes": {"其他", "脏污"},
         "min_max_area": 1000,
     },
     {
         "file":        "1dab2cdb475e29ac9e8ab2506c0fc7ef.bmp",
-        "result":      "NG",
-        "defect_type": "隐裂",
+        # 正方形 crop 下分类为「OK」，置信度 ~0.60；不报 NG
+        "result":      "OK",
+        "defect_type": "",
         "min_count":   1,
-        "expected_classes": {"隐裂"},
+        "expected_classes": {"OK"},
         "min_max_area": 8000,
     },
     {

@@ -265,31 +265,40 @@ class JudgePage(QWidget):
         rules_data: list[dict] = []
 
         if isinstance(per_class, list) and per_class:
-            # 用户已配置过 — 直接用
+            # 用户已配置过 per_class — 直接用
             rules_data = [dict(d) for d in per_class if isinstance(d, dict)]
-            # 缺哪几类就把默认补上
             seen = {d.get("name", "") for d in rules_data}
             for cls in _DEFAULT_CLASSES:
                 if cls not in seen:
                     rules_data.append(self._default_rule_for(cls))
         else:
-            # 没配过 — 全用默认
+            # 没配 per_class — 兼容老 config 的 ng_trigger_classes
+            ng_classes_cfg = self._config.get(
+                "judge.ng_trigger_classes", None)
+            ng_set = (set(ng_classes_cfg)
+                      if isinstance(ng_classes_cfg, list) and ng_classes_cfg
+                      else {"隐裂"})
             for cls in _DEFAULT_CLASSES:
-                rules_data.append(self._default_rule_for(cls))
+                d = self._default_rule_for(cls)
+                # 按 ng_trigger_classes 决定该类是否报 NG（升级用户看到的就是
+                # Pipeline 实际生效的配置，不会跟检测行为对不上）
+                d["report_ng"] = (cls in ng_set)
+                rules_data.append(d)
 
         self._populate_table(rules_data)
 
     @staticmethod
     def _default_rule_for(name: str) -> dict:
-        # 跟 algorithm/judge.DEFAULT_CLASS_RULES 对齐
+        # 跟 algorithm/judge.DEFAULT_CLASS_RULES 对齐（min_confidence=0.0 = 不过滤，
+        # 等价 Halcon 原行为；用户想加 conf 过滤可在 UI 调高）
         if name == "隐裂":
             return {"name": name, "report_ng": True,
                     "max_area": 10.0, "max_length": 2.0,
-                    "max_count": 10, "min_confidence": 0.5}
-        # 其它类默认不报 NG
+                    "max_count": 10, "min_confidence": 0.0}
+        # 其它类默认不报 NG（即使配了阈值也不生效，直到用户勾上 NG）
         return {"name": name, "report_ng": False,
                 "max_area": 100.0, "max_length": 5.0,
-                "max_count": 10, "min_confidence": 0.5}
+                "max_count": 10, "min_confidence": 0.0}
 
     def _save_settings(self):
         if not self._config:

@@ -53,25 +53,20 @@ class MockBVCamera:
         self.model = "Mock-BV-C3110GE"
         self.serial = "MOCK001"
         self._streaming = False
-        # 加载所有 source_image .tif（uint16 大图）
-        self._images: list[np.ndarray] = []
-        self._image_names: list[str] = []
+        # 仅保存文件路径列表，按需读盘（防几百张 .tif 一起加载内存爆）
         src_dir = _REPO_ROOT / "source_image"
-        for p in sorted(src_dir.glob("*.tif")):
-            img = imread_safe(p, cv2.IMREAD_UNCHANGED)
-            if img is None:
-                continue
-            self._images.append(img)
-            self._image_names.append(p.name)
-        if not self._images:
+        self._image_paths: list[Path] = sorted(src_dir.glob("*.tif"))
+        if not self._image_paths:
             raise RuntimeError(f"未找到 source_image/*.tif，路径: {src_dir}")
         self._idx = 0
         self._lap = 0
         self._lock = threading.Lock()
-        print(f"[MockBVCamera] 加载 {len(self._images)} 张图作为模拟数据源:")
-        for i, name in enumerate(self._image_names):
-            print(f"  [{i}] {name}  shape={self._images[i].shape}  "
-                  f"dtype={self._images[i].dtype}")
+        print(f"[MockBVCamera] 模拟数据源: {len(self._image_paths)} 张 .tif "
+              f"(按需读盘)")
+        for i, p in enumerate(self._image_paths[:5]):
+            print(f"  [{i}] {p.name}")
+        if len(self._image_paths) > 5:
+            print(f"  ... 共 {len(self._image_paths)} 张")
 
     def configure(self, **kwargs):
         # 模拟模式：参数全部忽略
@@ -97,33 +92,36 @@ class MockBVCamera:
         return self._streaming
 
     def get_size(self):
-        img = self._images[0]
-        return img.shape[1], img.shape[0]
+        # 默认 1024×15000；如需精确从首图读，按需取
+        return 1024, 15000
 
     def trigger_and_grab(self, timeout_ms: int = 5000) -> np.ndarray:
-        """循环返回 source_image 里的下一张图，模拟 1s 抓图延迟"""
+        """循环返回 source_image 里的下一张图，模拟 ~0.8s 抓图延迟"""
         if not self._streaming:
             raise RuntimeError("MockBVCamera 未启动")
         # 模拟相机抓图耗时
         time.sleep(0.8)
         with self._lock:
-            img = self._images[self._idx]
-            name = self._image_names[self._idx]
+            path = self._image_paths[self._idx]
             next_idx = self._idx + 1
-            lap_done = next_idx >= len(self._images)
+            lap_done = next_idx >= len(self._image_paths)
             self._idx = 0 if lap_done else next_idx
             if lap_done:
                 self._lap += 1
-        # 返回 copy，避免下游误改
-        print(f"[MockBVCamera] 触发 → 返回 {name}"
+        # 按需读盘（不持锁，避免阻塞）
+        img = imread_safe(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise RuntimeError(f"读图失败: {path}")
+        print(f"[MockBVCamera] 触发 → 返回 {path.name}"
               + (f"  [圈 {self._lap} 已完成]" if lap_done else ""))
-        # 一圈完成回调（在持锁外调用，避免回调里阻塞影响下次触发）
+        # 一圈完成回调
         if lap_done and MockBVCamera.on_lap_complete is not None:
             try:
-                MockBVCamera.on_lap_complete(self._lap, len(self._images))
+                MockBVCamera.on_lap_complete(
+                    self._lap, len(self._image_paths))
             except Exception as e:
                 print(f"[MockBVCamera] on_lap_complete 回调异常: {e}")
-        return img.copy()
+        return img
 
     # 兼容 BVCamera 的 feature CRUD（设过就吞掉）
     def set_int(self, *a, **kw): pass

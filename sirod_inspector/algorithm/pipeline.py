@@ -441,7 +441,7 @@ class Pipeline:
         """
         rows, cols = image.shape[:2]
 
-        for i, classified in enumerate(result.defects):  # i 用于日志定位
+        for i, classified in enumerate(result.defects):
             x, y, w, h = classified.bbox
 
             # 长边为边长的正方形 crop，缺陷居中、不出图
