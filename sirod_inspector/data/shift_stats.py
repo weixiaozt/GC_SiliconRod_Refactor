@@ -218,13 +218,25 @@ class ShiftStats:
             logger.warning(f"加载统计文件失败: {e}")
 
     def _save(self):
-        """将统计数据保存到 JSON 文件"""
+        """将统计数据保存到 JSON 文件（原子写 — 同 config.save 的修复理由）"""
         try:
             os.makedirs(os.path.dirname(self._file_path) or ".", exist_ok=True)
-            with open(self._file_path, "w", encoding="utf-8") as f:
+            tmp = self._file_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=4, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, self._file_path)
         except Exception as e:
             logger.error(f"保存统计文件失败: {e}")
+            try:
+                if os.path.exists(self._file_path + ".tmp"):
+                    os.remove(self._file_path + ".tmp")
+            except OSError:
+                pass
 
     def as_dict(self) -> dict:
         """返回当前统计数据的副本"""
