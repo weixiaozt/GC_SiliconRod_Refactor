@@ -6,3 +6,8 @@ tests/_diag*.txt
 logs/
 .venv/
 源码备份/
+# 现场图源（很大，不入库）
+source_image/*.zip
+source_image/*.zip.*
+source_image/*.tif
+source_image/ImageRaw/
