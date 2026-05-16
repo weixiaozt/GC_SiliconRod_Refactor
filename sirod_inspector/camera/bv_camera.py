@@ -742,14 +742,16 @@ class BVCamera:
                 )
             self._resources_allocated = True
 
-        # 预分配 1 个 image buffer 复用
-        img_pp = C.POINTER(_BVCAM_IMAGE)()
-        if not self._dll.BVCAM_ImageAlloc(
-                self._h_camera, C.byref(img_pp)):
-            raise BVCameraError(
-                f"ImageAlloc 失败: {_last_error_msg(self._dll)}"
-            )
-        self._image_alloc = img_pp
+        # 预分配 1 个 image buffer 复用（只在首次 start 时分配；后续 stop/start
+        # 循环要复用，否则每轮泄漏一个 ~30MB 缓冲，长跑 → 内核地址空间爆）
+        if self._image_alloc is None:
+            img_pp = C.POINTER(_BVCAM_IMAGE)()
+            if not self._dll.BVCAM_ImageAlloc(
+                    self._h_camera, C.byref(img_pp)):
+                raise BVCameraError(
+                    f"ImageAlloc 失败: {_last_error_msg(self._dll)}"
+                )
+            self._image_alloc = img_pp
 
         if not self._dll.BVCAM_ImageStart(self._h_camera):
             raise BVCameraError(
