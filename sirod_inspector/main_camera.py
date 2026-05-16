@@ -133,6 +133,9 @@ def save_inspect_images(data: InspectData, detection_result,
     _dir_cache: set = set()
 
     def _imwrite(path, img, ext):
+        """原子写：tmp 文件 + os.replace。
+        防磁盘半满时半截 TIF/BMP 被下游 MES 当成训练数据/marked 图传走。
+        """
         d = os.path.dirname(path)
         if d and d not in _dir_cache:
             os.makedirs(d, exist_ok=True)
@@ -140,9 +143,21 @@ def save_inspect_images(data: InspectData, detection_result,
         ok, buf = cv2.imencode(ext, img)
         if not ok:
             return False
-        with open(path, "wb") as f:
-            f.write(buf.tobytes())
-        return True
+        tmp_path = path + ".tmp"
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(buf.tobytes())
+            os.replace(tmp_path, path)
+            return True
+        except OSError as e:
+            logger.warning(f"写图失败 {path}: {e}")
+            # 清理 .tmp 残留
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
 
     try:
         # 0. TIF 原图（uint16，对应 Halcon D:/SiRod/ImageRaw/）
