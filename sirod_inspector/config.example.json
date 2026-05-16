@@ -1,0 +1,106 @@
+{
+  "_comment_": "SiRod Inspector 配置模板。复制为 config.json 后按工厂实际情况修改。未填字段全部回退到代码默认值（与 Halcon 端原值一致）。",
+
+  "_section_": "==== 数据源（main_camera.py 模式新增）====",
+  "models": {
+    "_comment_": "AI 模型路径。绝对路径或相对项目根目录的路径。默认 models/Model_seg.m 和 models/Model_cls.m",
+    "seg": "models/Model_seg.m",
+    "cls": "models/Model_cls.m"
+  },
+
+  "camera": {
+    "_comment_": "BV-3110-GIGE 相机参数。exposure_us=null 表示沿用相机当前曝光值",
+    "width": 1024,
+    "height": 15000,
+    "exposure_us": null,
+    "trigger_source": "Software",
+    "grab_timeout_ms": 10000,
+    "loop_interval_s": 2.0,
+    "_loop_comment_": "周期触发间隔秒；0 表示不自动循环（仅外部手动 trigger）"
+  },
+
+  "scanner": {
+    "_comment_": "扫码枪 TCP 客户端（Halcon Code_Tcp 兼容）",
+    "enabled": true,
+    "host": "192.168.12.56",
+    "port": 5000,
+    "poll_interval_s": 5.0,
+    "recv_timeout_s": 1.0,
+    "reconnect_interval_s": 3.0
+  },
+
+  "_section2_": "==== 检测判定 ====",
+  "judge": {
+    "_comment_": "缺陷判定阈值。任一指标超阈值即进入分类阶段确认；分类结果落在 ng_trigger_classes 才标 NG",
+    "max_area": 10,
+    "sum_area": 10,
+    "max_count": 10,
+    "max_length": 2,
+    "ng_trigger_classes": ["隐裂"]
+  },
+
+  "_section3_": "==== 老 TCP 模式（main.py）依然使用 ====",
+  "tcp": {
+    "host": "127.0.0.1",
+    "port": 3000
+  },
+
+  "_section4_": "==== UI / 数据消费 ====",
+  "alarm": {"enabled": true},
+
+  "image_store": {
+    "enabled": true,
+    "base_dir": "D:/SiRod/images",
+    "base_url": "http://10.32.50.220:8080"
+  },
+
+  "shift": {
+    "reset_times": ["08:00", "20:00"]
+  },
+
+  "line_id": "PV-B02",
+
+  "defect_types": ["隐裂", "崩边"],
+
+  "_section5_": "==== 外部系统 ====",
+  "database": {
+    "host": "127.0.0.1", "port": 3306,
+    "user": "root", "password": "123456",
+    "database": "b_xmartsql", "table": "squarstickresult"
+  },
+
+  "feishu": {
+    "_comment_": "飞书多维表格同步。enabled=false 时全部跳过。bot_webhook（可选）用于 SiRod 自身通知（暂未接入）",
+    "enabled": false,
+    "app_id": "",
+    "app_secret": "",
+    "app_token": "",
+    "table_id": "",
+    "base_url": "https://open.feishu.cn/open-apis"
+  },
+
+  "serial": {
+    "_comment_": "报警灯/PLC 串口。NG 信号和复位信号支持 HEX 字节或 ASCII 转义",
+    "enabled": true,
+    "port": "COM3",
+    "baudrate": 9600,
+    "timeout": 1,
+    "ng_signal": "A0 00 01 CC",
+    "reset_signal": "A0 00 00 CC"
+  },
+
+  "http": {
+    "_comment_": "MES HTTP 上传（仅 NG 棒触发）。HEAD 字段全部由 MES 提供",
+    "enabled": true,
+    "url": "http://10.31.20.29/MesAPI/Api/WMSToMESByProcedure",
+    "timeout": 10,
+    "head": {
+      "DEST_SYSTEM": "YC01MES",
+      "INTF_ID": "QPMES201",
+      "SRC_SYSTEM": "YinLieJianCe",
+      "SRC_MSGID": "",
+      "BACKUP1": "QPMES201_CryptoschisisDataEM",
+      "BACKUP2": "GRZ"
+    }
+  }
+}

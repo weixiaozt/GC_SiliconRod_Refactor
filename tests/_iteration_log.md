@@ -326,3 +326,81 @@ iter2 3dce4df: InspectEngine
 iter1 1d46510: BV camera ctypes
 iter0 ee4eaa2: algorithm baseline
 ```
+
+---
+
+## iter5 · 2026-05-16 · 部署文档化 + self-audit 修 bug
+
+### 完成
+
+本轮**不写新功能**，重心在文档 + bug 修复 + 回归。
+
+#### 1. 模型路径可配置
+
+`main_camera.py` 不再硬编码 models 路径，从 `config.models.seg/cls` 读取，
+未配置时 fallback 到 `<project>/models/Model_seg.m` 和 `Model_cls.m`。
+
+#### 2. 部署资产
+
+- **[sirod_inspector/config.example.json](sirod_inspector/config.example.json)** —
+  含全部配置项 + 行内注释（`_comment_` 伪键），用户复制为 `config.json` 即可
+- **[DEPLOY.md](DEPLOY.md)** —
+  5 步部署流程 + 配置速查 + 回滚指南 + sanity check 清单 + FAQ
+
+#### 3. self-audit 找到 3 个问题，修了 2 个
+
+| 问题 | 严重度 | 处理 |
+|---|---|---|
+| `InspectEngineConfig.skip_preprocess` flag 完全没起作用（两个 if 分支调用一模一样的代码）| **dead code 误导维护者** | 删除字段 + 简化 trigger_once |
+| `BVCamera.trigger_and_grab` 失败路径未调 `ImageReqAbortAll`，下次 ImageReq 可能失败 | **生产环境隐患** | 加 try-except abort |
+| `run_loop` 用 `_loop_stop.wait` 而非 `time.sleep` | 已经正确实现 ✓ | 无需修 |
+
+#### 4. 回归
+
+```
+smoke_inspect_engine.py:  4 InspectData @ ct=454-480ms  通过
+smoke_scanner.py:         3 棒号正常 + 自动重连 通过
+```
+
+### Modbus PLC 评估结果
+
+Halcon `Read_Modbus` 调用统计（35 处）：
+- bool 信号位：126/128/176/720/1024/181（PLC 状态信号）
+- int 寄存器：100/2009/2300/2400/2600/2102
+
+用途：PLC ↔ Halcon **状态握手**（开始检测、检测完成、棒到位、产线状态等）
+
+**结论：当前 Python 架构不依赖 PLC**
+- 相机软触发已在跑（不需要 PLC 触发）
+- 复位 / NG 报警走 serial_manager（已有）
+- 周期触发由 `InspectEngine.run_loop` 自驱
+
+→ Modbus 暂不接入。若工厂线必须 PLC 握手，再开 `core/modbus_client.py`。
+
+### 下一迭代候选
+
+1. **settings_page UI 加 NG 类别复选框**（需要 PyQt6，工厂机有，本地装不上无法验证）
+2. **真机集成测试**：等用户在工厂机跑过 `main_camera.py` 报问题
+3. **NG 类别 → 缺陷图库** 联动：当前 gallery_page 按 `defect_type` 分类显示，新增 NG 类别要保持一致
+4. **批量 cls 推理**：多缺陷一次推理（性能优化）
+5. **Modbus 客户端**（如果工厂线明确需要 PLC 握手）
+
+### 部署清单
+
+工厂机部署只需 3 步：
+1. `pip install` 依赖（DEPLOY.md 列了）
+2. `cp config.example.json config.json` + 改 host/port/credentials
+3. `python sirod_inspector/main_camera.py`
+
+回退到 Halcon 模式: `python sirod_inspector/main.py`
+
+### git
+
+```
+iter5 <new-sha>: docs + audit fixes (skip_preprocess dead code, ImageReqAbortAll on failure)
+iter4 d251927: scanner + NG configurable
+iter3 71951ea: main_camera.py
+iter2 3dce4df: InspectEngine
+iter1 1d46510: BV camera ctypes
+iter0 ee4eaa2: algorithm baseline
+```

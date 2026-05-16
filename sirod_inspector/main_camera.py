@@ -140,6 +140,17 @@ class SiRodCameraApp(QObject):
                        if isinstance(ng_classes_cfg, list) and ng_classes_cfg
                        else None)
 
+        # 模型路径：默认 <project>/models/，可由 config.models.seg/cls 覆盖
+        default_seg = os.path.join(_PARENT_DIR, "models", "Model_seg.m")
+        default_cls = os.path.join(_PARENT_DIR, "models", "Model_cls.m")
+        seg_path = self.config.get("models.seg", default_seg)
+        cls_path = self.config.get("models.cls", default_cls)
+        # 相对路径解析到项目根目录
+        if not os.path.isabs(seg_path):
+            seg_path = os.path.join(_PARENT_DIR, seg_path)
+        if not os.path.isabs(cls_path):
+            cls_path = os.path.join(_PARENT_DIR, cls_path)
+
         engine_cfg = InspectEngineConfig(
             camera_uid=0,
             width=int(self.config.get("camera.width", 1024)),
@@ -147,8 +158,8 @@ class SiRodCameraApp(QObject):
             exposure_us=self.config.get("camera.exposure_us", None),
             trigger_source=self.config.get("camera.trigger_source", "Software"),
             grab_timeout_ms=int(self.config.get("camera.grab_timeout_ms", 10000)),
-            seg_model=os.path.join(_PARENT_DIR, "models", "Model_seg.m"),
-            cls_model=os.path.join(_PARENT_DIR, "models", "Model_cls.m"),
+            seg_model=seg_path,
+            cls_model=cls_path,
             judge_config=JudgeConfig(
                 max_area=float(self.config.get("judge.max_area", 10)),
                 sum_area=float(self.config.get("judge.sum_area", 10)),
@@ -157,6 +168,7 @@ class SiRodCameraApp(QObject):
             ),
             ng_trigger_classes=ng_classes,
         )
+        logger.info(f"模型路径: seg={seg_path}  cls={cls_path}")
 
         # 棒号注入 — 扫码枪可用时从扫码枪取，否则 mock
         self._manual_rod_id = "NoRead"

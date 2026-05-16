@@ -168,9 +168,11 @@ class InspectEngineConfig:
     """``True``: ``InspectData.image`` 用 1024×3072 预处理后图（推荐，跟下游存档/上传一致）；
        ``False``: 用原始 15000×1024 uint16 图（大、占内存，仅用于训练数据采集）。"""
 
-    skip_preprocess: bool = False
-    """``True`` 时跳过 preprocess，把抓到的图直接喂 Pipeline。
-       仅用于调试 / 已外部预处理过的图。"""
+    # NOTE: skip_preprocess 字段已移除（dead code）。
+    # Pipeline.process() 内部按 image dtype 自动判别：
+    #   uint16 → 跑 preprocess；uint8 → 跳过。这个判别已经足够，
+    #   再额外引入开关只会让调用方困惑。如果未来真需要强制路径，
+    #   建议改在 Pipeline 层加参数，而不是在 Engine 层。
 
 
 # ============================================================
@@ -323,17 +325,10 @@ class InspectEngine:
                 timeout_ms=self.config.grab_timeout_ms,
             )
 
-            # 3) Pipeline（按 skip_preprocess 选择）
-            if self.config.skip_preprocess:
-                # 假设外部已预处理（uint8 + 1024×3072）
-                result = self._pipeline.process(
-                    frame, keep_processed_image=True,
-                )
-            else:
-                # 默认：让 Pipeline 内部做 preprocess
-                result = self._pipeline.process(
-                    frame, keep_processed_image=True,
-                )
+            # 3) Pipeline — preprocess 由内部按 dtype 自动判别
+            result = self._pipeline.process(
+                frame, keep_processed_image=True,
+            )
 
             # 4) 装配 InspectData
             self._inspect_id_counter += 1

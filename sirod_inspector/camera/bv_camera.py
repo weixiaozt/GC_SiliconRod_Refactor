@@ -798,6 +798,11 @@ class BVCamera:
         )
         if not rtn:
             status = self._image_alloc.contents.Status
+            # 失败路径：底层 buffer 仍处于 pending，必须 abort 否则下次 ImageReq 会失败
+            try:
+                self._dll.BVCAM_ImageReqAbortAll(self._h_camera)
+            except Exception:
+                pass
             raise BVCameraError(
                 f"ImageComplete 失败 (status={status}): "
                 f"{_last_error_msg(self._dll)}"
