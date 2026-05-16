@@ -96,13 +96,29 @@ class AppConfig:
             self.save()
 
     def save(self):
+        # 原子写：先写 .tmp 再 os.replace，防止程序在写一半时挂导致
+        # config.json 残缺（json.dump 是流式写，崩了会得到坏 JSON，
+        # 下次启动加载失败）。os.replace 在 Windows / POSIX 都是原子的。
         try:
             os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
-            with open(self._path, "w", encoding="utf-8") as f:
+            tmp_path = self._path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=4, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass    # 某些 FS 不支持 fsync — 软失败可接受
+            os.replace(tmp_path, self._path)
             logger.info(f"配置已保存: {self._path}")
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
+            # 失败时尽量清理 .tmp
+            try:
+                if os.path.exists(self._path + ".tmp"):
+                    os.remove(self._path + ".tmp")
+            except OSError:
+                pass
 
     def get(self, key: str, default=None):
         keys = key.split(".")

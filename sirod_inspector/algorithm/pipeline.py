@@ -455,23 +455,31 @@ class Pipeline:
                 x, y, w, h, _CROP_PADDING_PX, cols, rows,
             )
             if x1 <= x0 or y1 <= y0:
+                logger.warning(
+                    f"缺陷 #{i} bbox 退化 (x={x},y={y},w={w},h={h} → "
+                    f"crop {x0},{y0},{x1},{y1})，跳过"
+                )
                 continue
 
             crop = image[y0:y1, x0:x1]
             if crop.size == 0:
+                logger.warning(f"缺陷 #{i} crop size=0，跳过")
                 continue
+
+            # 不管分类成不成功，都先把 crop 留下来 — 现场出问题时
+            # 没有 crop 没法定位是不是 cls 模型挂了/输入异常
+            if keep_crops:
+                classified.crop = crop.copy()
 
             try:
                 cls = self.classifier.predict(crop)
             except Exception as e:
                 logger.warning(f"缺陷 #{i} 分类失败: {e}")
+                # 留 class_name="" → 走 "未分类" 路径，crop 仍存盘
                 continue
 
             classified.class_name = cls.name
             classified.class_confidence = float(cls.confidence)
-            if keep_crops:
-                # copy 一份避免外部修改预处理图时连带改动
-                classified.crop = crop.copy()
 
         # ── 按 per-class 规则做最终 NG 判定 ──
         verdict = judge_per_class(result.defects, self.class_rules)

@@ -309,12 +309,12 @@ class JudgePage(QWidget):
         self._config.set("judge.sum_area",   self._sp_sum_area.value())
         self._config.set("judge.max_count",  self._sp_max_count.value())
         self._config.set("judge.max_length", self._sp_max_length.value())
-        self._config.set("judge.per_class",  self._read_table())
-        self._config.save()
-
+        rules = self._read_table()
+        self._config.set("judge.per_class",  rules)
         # 兼容字段 — 给老代码用
-        ng_classes = [d["name"] for d in self._read_table() if d["report_ng"]]
+        ng_classes = [d["name"] for d in rules if d["report_ng"]]
         self._config.set("judge.ng_trigger_classes", ng_classes)
+        self._config.save()
         self._config.save()
 
         self.settings_saved.emit()
