@@ -120,12 +120,23 @@ def save_inspect_images(data: InspectData, detection_result,
 
     today = datetime.date.today().isoformat()
     ts = datetime.datetime.now().strftime("%H%M%S_%f")
-    stem = f"{(data.rod_id or 'NoRead')}_{ts}"
+    # rod_id 可能含路径/Windows 非法字符（生产场景扫码枪可能给 "ABC/123" 之类）
+    # 必须 sanitize 防破坏目录结构 / Windows 写盘报错
+    raw_rod = data.rod_id or "NoRead"
+    safe_rod = raw_rod
+    for ch in r'<>:"/\|?*' + '\t\r\n\x00':
+        safe_rod = safe_rod.replace(ch, "_")
+    safe_rod = safe_rod.strip(". ") or "NoRead"   # Windows 不允许尾点/空格
+    stem = f"{safe_rod}_{ts}"
+
+    # 已创建目录的缓存（每次落盘 makedirs 太频繁，缓存后 30+ 次/棒 → 1-3 次）
+    _dir_cache: set = set()
 
     def _imwrite(path, img, ext):
         d = os.path.dirname(path)
-        if d:
+        if d and d not in _dir_cache:
             os.makedirs(d, exist_ok=True)
+            _dir_cache.add(d)
         ok, buf = cv2.imencode(ext, img)
         if not ok:
             return False
@@ -766,10 +777,24 @@ class SiRodCameraApp(QObject):
             self._manual_rod_id = rod_id or "NoRead"
 
     def _save_images(self, data: InspectData, detection_result) -> dict:
-        """存全部图（包装函数 — 真正逻辑在 module-level ``save_inspect_images``）"""
-        base_dir = self.config.get("image_store.base_dir", "D:/SiRod/images")
-        raw_tif_dir = self.config.get("image_store.raw_tif_dir", "D:/SiRod/ImageRaw")
-        web_image_dir = self.config.get("image_store.web_image_dir", "D:/SiRod/WebImage")
+        """存全部图（包装函数 — 真正逻辑在 module-level ``save_inspect_images``）
+
+        相对路径基于项目根目录 resolve（防 cwd 被切到 EasyLabel/DeepLearning
+        后相对路径写到错位置）。
+        """
+        def _abs_path(p: str) -> str:
+            if not p:
+                return p
+            if os.path.isabs(p):
+                return p
+            return os.path.join(_PARENT_DIR, p)
+
+        base_dir = _abs_path(
+            self.config.get("image_store.base_dir", "D:/SiRod/images"))
+        raw_tif_dir = _abs_path(
+            self.config.get("image_store.raw_tif_dir", "D:/SiRod/ImageRaw"))
+        web_image_dir = _abs_path(
+            self.config.get("image_store.web_image_dir", "D:/SiRod/WebImage"))
         web_url_base = self.config.get("image_store.web_url_base",
                                          "http://10.32.50.220:8080")
         ng_cls_cfg = self.config.get("judge.ng_trigger_classes", None)
