@@ -16,8 +16,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Union
 
 import cv2
 import numpy as np
@@ -27,9 +28,26 @@ import numpy as np
 # 配色（按类别固定，同类别每次同色）
 # ============================================================
 
-def color_for_label(label: int) -> tuple:
-    """给 label index 一个固定但区分度高的 BGR 颜色"""
-    rng = np.random.default_rng(seed=label * 9973 + 1)
+def _stable_label_int(label: Union[int, str]) -> int:
+    """把 label（int 或 str）映射成稳定的整数种子。
+
+    str 走 md5，跨 Python 进程稳定（``hash(str)`` 在 Python 3.3+ 默认
+    每次启动重随机化，会让"同一类别每次不同色"）。
+    """
+    if isinstance(label, str):
+        return int.from_bytes(
+            hashlib.md5(label.encode("utf-8")).digest()[:4], "big"
+        )
+    return int(label)
+
+
+def color_for_label(label: Union[int, str]) -> tuple:
+    """给 label（int index 或 str 类别名）一个固定但区分度高的 BGR 颜色。
+
+    同一 label 每次返回同色（跨 Python 进程稳定）。
+    """
+    seed = _stable_label_int(label)
+    rng = np.random.default_rng(seed=seed * 9973 + 1)
     bgr = rng.integers(64, 256, size=3, dtype=np.int32)
     return int(bgr[0]), int(bgr[1]), int(bgr[2])
 
@@ -65,19 +83,38 @@ def _put_text(img_bgr: np.ndarray, text: str, xy: tuple,
                color: tuple = (255, 255, 255),
                bg: Optional[tuple] = None,
                pad: int = 3) -> np.ndarray:
-    """在 BGR 图上写支持中文的文字"""
+    """在 BGR 图上写一条支持中文的文字（单条；多条用 ``_put_texts_batch``）"""
+    return _put_texts_batch(
+        img_bgr, [(xy, text, color, bg)], font_size=font_size, pad=pad
+    )
+
+
+def _put_texts_batch(img_bgr: np.ndarray,
+                      items: list,
+                      *,
+                      font_size: int = 18,
+                      pad: int = 3) -> np.ndarray:
+    """一次 PIL pass 画多条文字。
+
+    items: list of ``((x, y), text, color_bgr, bg_bgr_or_None)``。
+    比循环调用 ``_put_text`` 快 N 倍（避免 N 次 BGR↔RGB 抖动）。
+    """
+    if not items:
+        return img_bgr
     from PIL import Image, ImageDraw
     pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
     font = _get_font(font_size)
-    x, y = xy
-    bbox = draw.textbbox((x, y), text, font=font)
-    if bg is not None:
-        draw.rectangle(
-            (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad),
-            fill=(bg[2], bg[1], bg[0]),
-        )
-    draw.text((x, y), text, fill=(color[2], color[1], color[0]), font=font)
+    for xy, text, color, bg in items:
+        x, y = xy
+        bbox = draw.textbbox((x, y), text, font=font)
+        if bg is not None:
+            draw.rectangle(
+                (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad),
+                fill=(bg[2], bg[1], bg[0]),
+            )
+        draw.text((x, y), text,
+                  fill=(color[2], color[1], color[0]), font=font)
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 
@@ -147,10 +184,12 @@ def draw_marked_full(image_gray: np.ndarray,
             color = (200, 200, 200)         # 灰 = 未分类
         cv2.rectangle(vis, (x, y), (x + w, y + h), color, rect_thickness)
 
-    # 3) 标类别名（PIL 一次画完，避免反复 BGR↔RGB 抖动）
+    # 3) 标类别名 — 所有文本一次 PIL 转换内画完（之前每个缺陷各转一次，
+    #    10 个缺陷 = 10 次 BGR↔RGB 抖动，每次 ~10ms 在 3072×1024 上）
     font_size = max(18, max(rows, cols) // 100)
+    text_items = []                              # [(xy, text, color, bg)]
     for d in defects:
-        x, y, w, h = d.bbox
+        x, y, _w, _h = d.bbox
         if d.class_name in ng_trigger_classes:
             txt_color = (255, 255, 255); bg = (0, 0, 255)
         elif d.class_name:
@@ -160,8 +199,9 @@ def draw_marked_full(image_gray: np.ndarray,
         label = (f"{d.class_name} {d.class_confidence:.2f}"
                  if d.class_name else f"a={d.area} r={d.outer_radius:.1f}")
         ty = max(0, y - font_size - 6)
-        vis = _put_text(vis, label, (x, ty),
-                         font_size=font_size, color=txt_color, bg=bg)
+        text_items.append(((x, ty), label, txt_color, bg))
+    if text_items:
+        vis = _put_texts_batch(vis, text_items, font_size=font_size)
 
     return vis
 
@@ -190,8 +230,9 @@ def draw_marked_crop(crop_gray: np.ndarray,
 
     if mask.any():
         if defect.class_name:
-            # 用类别 label 的颜色（用 hash 转 int 保持每类一致）
-            color = color_for_label(abs(hash(defect.class_name)) & 0xff)
+            # 按类别名取色（跨进程稳定 — 不用 builtin hash，因为它每次
+            # Python 启动重随机化，会让同一类别每次不同色）
+            color = color_for_label(defect.class_name)
         else:
             color = (0, 200, 255)
         overlay = vis.copy()

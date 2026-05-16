@@ -230,6 +230,10 @@ class InspectEngine:
         self.on_inspect = on_inspect or (lambda d: None)
         self.on_error = on_error or (lambda e: logger.error(f"InspectEngine 错误: {e}", exc_info=True))
 
+        # 一次性探测 on_inspect 接受 1 个还是 2 个参数（避免 trigger_once
+        # 每次都跑 inspect.signature — 高频时是无谓开销）
+        self._on_inspect_arity = self._detect_arity(self.on_inspect)
+
         self._camera: Optional[BVCamera] = None
         self._pipeline: Optional[Pipeline] = None
         self._inspect_id_counter = 0
@@ -239,6 +243,18 @@ class InspectEngine:
         # 运行循环控制
         self._loop_thread: Optional[threading.Thread] = None
         self._loop_stop = threading.Event()
+
+    @staticmethod
+    def _detect_arity(fn: Callable) -> int:
+        """探测 callable 的位置参数个数（兼容旧 1 参数签名）。失败 → 1。"""
+        import inspect as _inspect
+        try:
+            sig = _inspect.signature(fn)
+            return len([p for p in sig.parameters.values()
+                         if p.kind in (p.POSITIONAL_ONLY,
+                                        p.POSITIONAL_OR_KEYWORD)])
+        except (ValueError, TypeError):
+            return 1
 
     # ─────────── 生命周期 ───────────
 
@@ -363,17 +379,9 @@ class InspectEngine:
                 raw_frame=raw_frame_for_inspect,
             )
 
-            # 5) 回调 — 兼容 1 参数和 2 参数两种签名
+            # 5) 回调 — 兼容 1 参数和 2 参数两种签名（arity 在 __init__ 缓存）
             try:
-                import inspect as _inspect
-                try:
-                    sig = _inspect.signature(self.on_inspect)
-                    n_params = len([p for p in sig.parameters.values()
-                                     if p.kind in (p.POSITIONAL_ONLY,
-                                                    p.POSITIONAL_OR_KEYWORD)])
-                except (ValueError, TypeError):
-                    n_params = 1
-                if n_params >= 2:
+                if self._on_inspect_arity >= 2:
                     self.on_inspect(data, result)
                 else:
                     self.on_inspect(data)
