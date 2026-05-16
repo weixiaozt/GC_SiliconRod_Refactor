@@ -547,6 +547,19 @@ class SiRodCameraApp(QObject):
         except Exception as e:
             logger.error(f"保存统计数据失败: {e}", exc_info=True)
 
+        # 排空后台 QThreadPool（每次检测的存图 / 写库 / 上传都跑在这）
+        # 不排空：进程退出时可能正在写一半的图 / DB transaction 半途崩，
+        # 留下损坏文件。给 5 秒上限 — 单次任务正常 <1 秒，长跑挂死兜底。
+        try:
+            from PyQt6.QtCore import QThreadPool
+            pool = QThreadPool.globalInstance()
+            pending = pool.activeThreadCount()
+            if pending > 0:
+                logger.info(f"排空后台任务（{pending} 个进行中）...")
+                pool.waitForDone(5000)
+        except Exception as e:
+            logger.warning(f"排空后台任务异常（忽略继续关闭）: {e}")
+
         # 摘掉 LogPage 的 logging handler，避免关程序时还接日志报错
         try:
             self.log_page.detach()
