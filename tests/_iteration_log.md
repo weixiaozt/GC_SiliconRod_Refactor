@@ -135,3 +135,100 @@ git log --oneline
 依旧没有 webhook 或 bitable 凭据。如要发送：
 - 在 [sirod_inspector/config.json](sirod_inspector/config.json) 的 `feishu` 节填 `app_id/app_secret/app_token/table_id`
 - 或在文件里加一项 `feishu.bot_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/XXX"`，下次迭代我会接入
+
+---
+
+## iter3 · 2026-05-16 · main.py 集成（并行入口）
+
+### 策略：平行入口而非侵入式改
+
+考虑到 main.py 是 584 行复杂逻辑（DB/飞书/串口/MES/Run.bat/定时器/UI 接线），直接改有跑偏风险。改为：
+
+- **保留 `sirod_inspector/main.py` 原样不动** — Halcon 模式仍可用，作为可靠回退
+- **新增 `sirod_inspector/main_camera.py`** — 相机驱动模式入口（~530 行）
+
+切换方式::
+
+    python sirod_inspector/main.py           # Halcon 模式（原）
+    python sirod_inspector/main_camera.py    # 相机模式（新）
+
+### main_camera.py 与 main.py 的差异
+
+| 模块 | main.py | main_camera.py |
+|---|---|---|
+| 数据源 | `TCPServer` 接收 Halcon 推送 | `InspectEngine` 自驱相机 |
+| Halcon 进程 | `RunBatManager` 拉起 Run.bat | 移除 |
+| 棒号 | 从 Halcon JSON 字段 `晶编` 取 | `rod_id_provider` 回调（默认 NoRead，待扫码枪接入） |
+| 周期 | Halcon 端 `wait_seconds(2)` | `InspectEngine.run_loop(interval_s=2.0)` |
+| UI / DB / 飞书 / MES / 串口 | — 完全相同 — |
+| InspectData 消费链路 | `_handle_tcp_data` | `_handle_inspect_data`（同款代码） |
+
+**关键：消费链路代码 1:1 复用。InspectData 是统一契约。**
+
+### 新增配置项（main_camera.py 用，config.json 可选）
+
+```json
+{
+  "camera": {
+    "width": 1024,
+    "height": 15000,
+    "exposure_us": null,
+    "trigger_source": "Software",
+    "grab_timeout_ms": 10000,
+    "loop_interval_s": 2.0
+  },
+  "judge": {
+    "max_area": 10, "sum_area": 10, "max_count": 10, "max_length": 2
+  }
+}
+```
+
+未配置时全部用默认值。
+
+### 测试
+
+PyQt6 headless 集成测试因 **Windows 长路径限制** 安装失败（不是代码问题）。
+改为更轻量但更精确的「消费契约测试」：
+
+- [tests/smoke_inspect_data_contract.py](tests/smoke_inspect_data_contract.py)
+- 构造典型 NG（隐裂 0.58）和 OK 的 `DetectionResult`
+- 经 `detection_to_inspect_data()` 装配为 `InspectData`
+- 验证 **15 个字段全齐** + **9 项一致性约束全过**
+
+结果::
+
+    [字段检查] 15/15 OK
+    [一致性] 9/9 OK
+    [OK] 契约测试通过
+
+→ **`main_camera.py` 跑起来后，UI/DB/飞书/MES 消费侧不会有任何字段不匹配**
+
+### 当前 iter3 限制
+
+1. **未真机跑过 main_camera.py** — PyQt6 装不上，需要用户自己在工厂机上验证（应该装了 PyQt6 因为原 main.py 就用）
+2. **棒号还是 mock** — 当前是 `NoRead`，下次接入扫码枪 TCP 客户端
+3. **NG 触发类别还是 hardcode** — `NG_TRIGGER_CLASSES = {"隐裂"}`，下次接入 settings_page
+
+### 部署建议
+
+在你的工厂机上：
+
+```bash
+# 先备份配置
+cp sirod_inspector/config.json sirod_inspector/config.json.bak
+
+# 试跑相机模式
+python sirod_inspector/main_camera.py
+
+# 不满意回退
+python sirod_inspector/main.py  # 仍走 Halcon 通道
+```
+
+### git
+
+```
+iter3 <new-sha>: main_camera.py + contract test
+iter2 3dce4df:   InspectEngine
+iter1 1d46510:   BV camera ctypes
+iter0 ee4eaa2:   algorithm baseline
+```
