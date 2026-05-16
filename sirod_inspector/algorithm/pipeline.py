@@ -268,8 +268,14 @@ class Pipeline:
             judge_reasons=list(verdict.reasons),
         )
 
-        # 6) 若需分类确认，对每个缺陷做 crop + cls
-        if verdict.needs_classification:
+        # 6) 分类 + per-class 判定
+        #    历史上只在 verdict.needs_classification（全局阈值 max_area /
+        #    sum_area / max_count / max_length 超限）时才分类。但 iter8 上
+        #    了 per-class 规则后，每类可能有更严的阈值（如 "隐裂 max_area=50"
+        #    远低于全局 max_area=500）。如果继续按全局门控，per-class 永远
+        #    没机会跑 → 真正的小型 NG 缺陷被吞。
+        #    修复：只要有候选缺陷就分类，让 per-class 规则有机会判 NG。
+        if result.defects:
             self._classify_defects(processed, result, keep_crops=keep_crops)
 
         result.ct_ms = (time.perf_counter() - t_start) * 1000.0
