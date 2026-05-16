@@ -394,7 +394,7 @@ class Pipeline:
         worst_ng_length = -1.0
         worst_ng_type = ""
 
-        for i, classified in enumerate(result.defects):
+        for i, classified in enumerate(result.defects):  # i 用于日志定位
             x, y, w, h = classified.bbox
 
             # 长边为边长的正方形 crop，缺陷居中、不出图

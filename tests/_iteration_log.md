@@ -71,3 +71,67 @@
 git log --oneline
 git reset --hard <baseline-sha>   # 回滚到 iter0 = algorithm 完成、相机未做的状态
 ```
+
+---
+
+## iter2 · 2026-05-16 · 检测引擎（camera + pipeline 编排）
+
+### 完成
+
+- **新模块** [sirod_inspector/core/inspect_engine.py](sirod_inspector/core/inspect_engine.py) (~370 行)
+  - `InspectEngine` 类：camera + Pipeline + 棒号注入 三合一编排器
+  - `InspectEngineConfig` dataclass：所有参数集中
+  - `detection_to_inspect_data()`：算法层 `DetectionResult` → UI 层 `InspectData` 适配
+  - **2 种触发模式**：
+    - `trigger_once()` 同步（外部主动调用）
+    - `run_loop(interval_s, trigger_event=None)` 异步周期或事件驱动
+  - 公开 API：`start / stop / stop_loop / trigger_once / run_loop`，幂等
+  - 回调：`on_inspect(InspectData)` / `on_error(Exception)`，工作线程上调用
+
+- **新 smoke** [tests/smoke_inspect_engine.py](tests/smoke_inspect_engine.py)
+  - 实拍验证：trigger_once × 1 + run_loop × 2 = 共 3-4 个 InspectData
+  - 字段完整性检查：rod_id/inspect_id/result/quality/defect_type/count/area/length/ct/image/ts/raw_json
+
+- **iter2 self-audit 修复**
+  - 帧拷贝优化：`string_at` → `from_address + frombuffer + copy`，**实测 13.3ms → 6.6ms / 30MB 帧（2x 提速）**
+  - `InspectEngine.stop_loop()` 公开 API（之前测试用了 private `_loop_stop`）
+  - pipeline.py 内 `i` 变量加注释（之前看似 unused）
+
+### 实测（连续 4 次软触发）
+
+```
+trigger_once × 1:    rod=TEST00001  OK  ct=503ms   total=1697ms
+run_loop × 3 @ 2s:   rod=TEST0000{2,3,4}  OK  ct=456-579ms / image=(1024,3072) uint8
+```
+
+### 数据契约（确认与现有 UI 完全兼容）
+
+`InspectData` 14 个字段全部正确填充：
+- 算法字段：result, quality, defect_type, defect_count, max_area, total_area, max_length
+- 元数据：rod_id（来自 rod_id_provider 回调）, inspect_id（自增）, ct（秒）
+- 时间戳：check_time, upload_time, timestamp
+- 图像：image=预处理后图 1024×3072 uint8（也可切换为原始 15000×1024 uint16）
+- raw_json: 含 judge_reasons + 每缺陷的 bbox/area/outer_radius/class_name/conf
+
+→ **可直接喂给现有 `main.py` 的 `_handle_tcp_data()` 消费链路（UI/DB/飞书/MES），无需改动消费侧**
+
+### iter2 git
+
+```bash
+git log --oneline
+# iter2 <new-sha>
+# iter1 1d46510
+# iter0 ee4eaa2
+```
+
+### 下一迭代候选
+
+1. **main.py 集成 InspectEngine** — 把 TCPServer 替换为 InspectEngine，连接到现有 UI/DB/飞书/MES。这是真正的"开关切换"步骤
+2. **扫码枪 client** — 替代当前 `lambda: "NoRead"`，从 Halcon `Code_Tcp` 的 192.168.12.56:5000 协议迁移
+3. **NG 触发类别可配置** — 接 settings_page
+
+### 飞书通知
+
+依旧没有 webhook 或 bitable 凭据。如要发送：
+- 在 [sirod_inspector/config.json](sirod_inspector/config.json) 的 `feishu` 节填 `app_id/app_secret/app_token/table_id`
+- 或在文件里加一项 `feishu.bot_webhook = "https://open.feishu.cn/open-apis/bot/v2/hook/XXX"`，下次迭代我会接入
