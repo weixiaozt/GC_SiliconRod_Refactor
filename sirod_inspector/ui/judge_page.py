@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import List
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QLocale
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QGroupBox, QFormLayout, QPushButton,
@@ -47,9 +47,19 @@ from PyQt6.QtWidgets import (
 _DEFAULT_CLASSES = ["隐裂", "崩边", "其他", "脏污", "线痕", "拼缝", "OK", "缺口"]
 
 
+_C_LOCALE = QLocale(QLocale.Language.C)
+
+
 def _style_spin(sp):
-    """统一表格内 spin box 显示：足够宽 + 居中 + 内边距 — 防上下箭头把数字挤掉
-    （之前 "100.0" 会被显示成 "100 0"，小数点被箭头压住）"""
+    """统一表格内 spin box 显示。
+
+    两个问题一起修：
+    1. 之前用 Windows 中文 locale，小数分隔符是全角"．" / "。"，看起来像
+       空格（用户截图："10.0" 显示成 "10 0"，"100.0" 显示成 "100 0"）。
+       → 强制 C locale，用 ASCII "."
+    2. 上下箭头默认布局会挤压显示区，给最小宽 110 + padding 留位置。
+    """
+    sp.setLocale(_C_LOCALE)
     sp.setMinimumWidth(110)
     sp.setAlignment(Qt.AlignmentFlag.AlignCenter)
     sp.setStyleSheet(
@@ -96,6 +106,7 @@ class JudgePage(QWidget):
         self._sp_max_area.setRange(0, 1e9)
         self._sp_max_area.setValue(10)
         self._sp_max_area.setDecimals(1)
+        self._sp_max_area.setLocale(_C_LOCALE)
         self._sp_max_area.setToolTip(
             "单个缺陷面积上限（像素）。超过即进入分类阶段。")
         gf.addRow("max_area (单缺陷面积):", self._sp_max_area)
@@ -104,12 +115,14 @@ class JudgePage(QWidget):
         self._sp_sum_area.setRange(0, 1e9)
         self._sp_sum_area.setValue(10)
         self._sp_sum_area.setDecimals(1)
+        self._sp_sum_area.setLocale(_C_LOCALE)
         self._sp_sum_area.setToolTip("所有缺陷总面积上限。")
         gf.addRow("sum_area (总面积):", self._sp_sum_area)
 
         self._sp_max_count = QSpinBox()
         self._sp_max_count.setRange(0, 1_000_000)
         self._sp_max_count.setValue(10)
+        self._sp_max_count.setLocale(_C_LOCALE)
         self._sp_max_count.setToolTip("缺陷总数上限。")
         gf.addRow("max_count (总数量):", self._sp_max_count)
 
@@ -117,6 +130,7 @@ class JudgePage(QWidget):
         self._sp_max_length.setRange(0, 1e9)
         self._sp_max_length.setValue(2)
         self._sp_max_length.setDecimals(2)
+        self._sp_max_length.setLocale(_C_LOCALE)
         self._sp_max_length.setToolTip("单个缺陷 outer_radius（外接圆半径）上限。")
         gf.addRow("max_length (单缺陷长度):", self._sp_max_length)
 
