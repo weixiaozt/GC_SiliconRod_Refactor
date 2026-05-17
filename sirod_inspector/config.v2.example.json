@@ -1,0 +1,84 @@
+{
+    "_comment": "盐城部署 v2 模板 — 跟老版本（Halcon+Python）完全隔离的配置。复制为 config.json 后按现场改 IP / 表名 / 端口 / MES URL。",
+    "tcp": {
+        "_comment": "扫码枪 / Halcon 通信。生产用相机模式时可保持默认；若两套同时跑要换端口避免冲突",
+        "host": "127.0.0.1",
+        "port": 3000
+    },
+    "database": {
+        "_comment": "★ v2 用独立表名，不污染老表 squarstickresult。新表程序首次启动自动 CREATE",
+        "host": "现场 MySQL IP",
+        "port": 3306,
+        "user": "root",
+        "password": "改成现场密码",
+        "database": "b_xmartsql",
+        "table": "squarstickresult_v2"
+    },
+    "feishu": {
+        "_comment": "★ v2 调试期 false — 别让现场飞书机器人收双份",
+        "enabled": false,
+        "app_id": "",
+        "app_secret": "",
+        "table_id": "",
+        "base_url": "https://open.feishu.cn/open-apis"
+    },
+    "image_store": {
+        "_comment": "★ v2 独立存图根目录，不覆盖老版 D:/SiRod",
+        "enabled": true,
+        "base_dir": "D:/SiRod_v2/images",
+        "raw_tif_dir": "D:/SiRod_v2/ImageRaw",
+        "web_image_dir": "D:/SiRod_v2/WebImage",
+        "web_url_base": "http://现场服务器IP:端口/v2"
+    },
+    "shift": {
+        "reset_times": [
+            "08:00",
+            "20:00"
+        ]
+    },
+    "line_id": "PV-B02",
+    "serial": {
+        "_comment": "★ 同一 COM 一次只能一个进程占用 — 跑 v2 前任务管理器先关老版 python",
+        "enabled": true,
+        "port": "COM3",
+        "baudrate": 9600,
+        "timeout": 1,
+        "ng_signal": "A0 00 01 CC",
+        "reset_signal": "A0 00 00 CC"
+    },
+    "alarm": {
+        "enabled": true
+    },
+    "http": {
+        "_comment": "★ v2 调试期 false — 别让 MES 收双份记录。稳定后翻 true 切换",
+        "enabled": false,
+        "url": "http://10.31.20.29/MesAPI/Api/WMSToMESByProcedure",
+        "timeout": 10,
+        "head": {
+            "DEST_SYSTEM": "YC01MES",
+            "INTF_ID": "QPMES201",
+            "SRC_SYSTEM": "YinLieJianCe_V2",
+            "SRC_MSGID": "",
+            "BACKUP1": "QPMES201_CryptoschisisDataEM",
+            "BACKUP2": "GRZ_V2"
+        }
+    },
+    "judge": {
+        "_comment": "判定参数 — 装好后用 UI 的 参数 tab 现场调，配置变更即时生效（iter24 热加载）",
+        "max_area": 10.0,
+        "sum_area": 10.0,
+        "max_count": 10,
+        "max_length": 2.0,
+        "per_class": [
+            {"name": "隐裂", "report_ng": true,  "max_area": 10.0,  "max_length": 2.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "崩边", "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "其他", "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "脏污", "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "线痕", "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "拼缝", "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "OK",   "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0},
+            {"name": "缺口", "report_ng": false, "max_area": 100.0, "max_length": 5.0, "max_count": 10, "min_confidence": 0.0}
+        ],
+        "ng_trigger_classes": ["隐裂"]
+    }
+}

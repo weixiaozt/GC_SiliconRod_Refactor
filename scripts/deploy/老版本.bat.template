@@ -1,0 +1,41 @@
+@echo off
+chcp 65001 >nul
+title 老版本 (Halcon+Python) — 生产稳定版
+
+REM ============================================================
+REM 老版本启动器模板 — 部署时把下面的 "改成老版本实际路径" 替换
+REM 例：cd /d D:\silicon-rod-defect-review
+REM ============================================================
+
+cd /d 改成老版本实际路径
+if errorlevel 1 (
+    echo ERROR: 老版本路径配错了，请编辑本脚本里的 cd 路径
+    pause
+    exit /b 1
+)
+
+REM 防新老同时跑撞硬件
+tasklist /FI "IMAGENAME eq python.exe" 2>nul | find /I "python.exe" >nul
+if not errorlevel 1 (
+    echo.
+    echo ============================================
+    echo 检测到 python.exe 在跑（可能是新版本）
+    echo 请到任务管理器结束所有 python.exe 后再启动
+    echo ============================================
+    echo.
+    pause
+    exit /b 2
+)
+
+echo.
+echo ============================================
+echo  SiRod Inspector — 老版本 (Halcon+Python) 启动中
+echo ============================================
+echo.
+
+REM 按老版本实际启动命令改这一行（可能是 main.py / Run.bat / start.py 等）
+python main.py
+
+echo.
+echo 程序已退出。按任意键关闭窗口。
+pause >nul
