@@ -346,11 +346,9 @@ class JudgePage(QWidget):
         ng_classes = [d["name"] for d in rules if d["report_ng"]]
         self._config.set("judge.ng_trigger_classes", ng_classes)
         self._config.save()
-        self._config.save()
 
         self.settings_saved.emit()
         QMessageBox.information(
             self, "已保存",
-            "判定参数已保存。\n"
-            "⚠ 部分更改（per-class 规则）需要重启程序才能生效。"
+            "判定参数已保存，下一棒检测立即生效。"
         )

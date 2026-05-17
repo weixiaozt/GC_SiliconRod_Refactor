@@ -182,6 +182,29 @@ class Pipeline:
             f"ng_classes={set(self.ng_trigger_classes)}"
         )
 
+    # ─────────── 运行时配置热更新 ───────────
+
+    def set_class_rules(self, rules: List[ClassRule]) -> None:
+        """热替换 per-class 规则，无需重启。
+
+        Python list 赋值是原子的（一次引用切换），即使有 worker 线程
+        正在 _classify_defects 中读 self.class_rules，最坏情况下它
+        看到旧 list；下一次 inspect 看到新 list。不会读到半截。
+        """
+        self.class_rules = list(rules)
+        self.ng_trigger_classes = frozenset(
+            r.name for r in self.class_rules if r.report_ng
+        )
+        logger.info(
+            f"判定规则已热更新: {len(self.class_rules)} 类, "
+            f"ng_classes={set(self.ng_trigger_classes)}"
+        )
+
+    def set_judge_config(self, judge_config: JudgeConfig) -> None:
+        """热替换全局几何阈值。"""
+        self.judge_config = judge_config
+        logger.info(f"全局几何阈值已热更新: {self.judge_config}")
+
     # ─────────── 资源管理 ───────────
 
     def close(self) -> None:

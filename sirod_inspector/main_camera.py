@@ -790,7 +790,36 @@ class SiRodCameraApp(QObject):
             logger.error(f"保存报警开关状态失败: {e}", exc_info=True)
 
     def _on_judge_settings_saved(self):
-        logger.warning("判定参数已变更 — 部分需重启程序生效")
+        """UI 保存判定参数 → 重读 config → 热推到运行中的 Pipeline，无需重启"""
+        try:
+            # per-class 规则
+            per_class_cfg = self.config.get("judge.per_class", None)
+            new_rules = []
+            if isinstance(per_class_cfg, list) and per_class_cfg:
+                for d in per_class_cfg:
+                    if not isinstance(d, dict) or not d.get("name"):
+                        continue
+                    new_rules.append(ClassRule(
+                        name=str(d.get("name")),
+                        report_ng=bool(d.get("report_ng", False)),
+                        max_area=float(d.get("max_area", 1e9)),
+                        max_length=float(d.get("max_length", 1e9)),
+                        max_count=int(d.get("max_count", 1_000_000)),
+                        min_confidence=float(d.get("min_confidence", 0.0)),
+                    ))
+            self.engine.set_class_rules(new_rules)
+
+            # 全局几何阈值
+            from sirod_inspector.algorithm import JudgeConfig
+            self.engine.set_judge_config(JudgeConfig(
+                max_area=float(self.config.get("judge.max_area", 10)),
+                sum_area=float(self.config.get("judge.sum_area", 10)),
+                max_count=int(self.config.get("judge.max_count", 10)),
+                max_length=float(self.config.get("judge.max_length", 2)),
+            ))
+            logger.info(f"判定参数已热更新生效（{len(new_rules)} 类 + 全局阈值）")
+        except Exception as e:
+            logger.error(f"判定参数热更新失败，请重启程序: {e}", exc_info=True)
 
     def _on_mes_status_updated(self, success: bool, rod_id: str, message: str):
         try:

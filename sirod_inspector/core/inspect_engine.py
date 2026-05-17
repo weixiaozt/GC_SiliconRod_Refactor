@@ -324,6 +324,20 @@ class InspectEngine:
         self._started = False
         logger.info("InspectEngine 已停止")
 
+    # ─────────── 热更新（无需重启） ───────────
+
+    def set_class_rules(self, rules) -> None:
+        """运行时热更新 per-class 规则；若 pipeline 已起则同步推进去。"""
+        self.config.class_rules = list(rules) if rules else None
+        if self._pipeline is not None:
+            self._pipeline.set_class_rules(rules or [])
+
+    def set_judge_config(self, judge_config) -> None:
+        """运行时热更新全局几何阈值。"""
+        self.config.judge_config = judge_config
+        if self._pipeline is not None:
+            self._pipeline.set_judge_config(judge_config)
+
     def _cleanup_partial(self) -> None:
         if self._camera is not None:
             try:
