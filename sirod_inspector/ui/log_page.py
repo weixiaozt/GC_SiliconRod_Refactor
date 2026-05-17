@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -77,6 +77,19 @@ class LogPage(QWidget):
 
         # 缓存所有日志（用于过滤切换时重画）
         self._all_lines: deque = deque(maxlen=max_lines)
+
+        # 待处理增量（只在 _flush_pending 时合并写入 QPlainTextEdit）
+        # 之前每条 log 都直接 appendHtml + 拉滚动条到底，QPlainTextEdit 到
+        # maxBlockCount 上限后每次 append 都 O(n) 重排 + 滚动条全量 paint，
+        # 后台 pipeline 每秒 ~3 条 log → 切 参数 页时表格重布局撞上 → UI 卡。
+        # 现在改成节流：500ms 一次批量 flush，hidden 时直接跳过（恢复显示
+        # 时一次性重画整个缓存）。
+        self._pending: list = []          # [(level, line), ...]
+        self._dirty = False                # 缓存里有新内容但 UI 还没渲染
+        self._flush_timer = QTimer(self)
+        self._flush_timer.setInterval(500)
+        self._flush_timer.timeout.connect(self._flush_pending)
+        self._flush_timer.start()
 
         self._init_ui()
         self._log_signal.connect(self._on_log_emitted)
@@ -155,34 +168,68 @@ class LogPage(QWidget):
         self._log_signal.emit(level, line)
 
     def _on_log_emitted(self, level: str, line: str):
-        """UI 线程：缓存 + 显示（如果当前过滤允许）"""
+        """UI 线程：缓存 + 入队，不直接动 QPlainTextEdit（_flush_pending 批量）"""
         self._all_lines.append((level, line))
         if self._show_levels.get(level, True):
-            self._append(level, line)
+            self._pending.append((level, line))
+            self._dirty = True
 
-    def _append(self, level: str, line: str):
-        color = LEVEL_COLOR.get(level, "#d0d0d0")
-        # appendHtml 自动加换行
-        safe = (line.replace("&", "&amp;")
-                     .replace("<", "&lt;")
-                     .replace(">", "&gt;"))
-        self._text.appendHtml(
-            f'<span style="color:{color}">{safe}</span>'
-        )
+    def _flush_pending(self):
+        """500ms 定时把 _pending 一次性写入 QPlainTextEdit。
+        widget 隐藏时跳过，等 showEvent 一起重画。"""
+        if not self._pending:
+            return
+        if not self.isVisible():
+            # 隐藏时不刷新 — 切回来时 showEvent 全量重画
+            return
+        # 批量构造 HTML 一次性 appendHtml，节省 N-1 次内部 reflow
+        chunks = []
+        for level, line in self._pending:
+            color = LEVEL_COLOR.get(level, "#d0d0d0")
+            safe = (line.replace("&", "&amp;")
+                         .replace("<", "&lt;")
+                         .replace(">", "&gt;"))
+            chunks.append(f'<span style="color:{color}">{safe}</span>')
+        # 用 <br> 分隔，一次 appendHtml — 比 N 次 append 快得多
+        self._text.appendHtml("<br>".join(chunks))
+        self._pending.clear()
+        self._dirty = False
         if self._auto_scroll:
             sb = self._text.verticalScrollBar()
             sb.setValue(sb.maximum())
+
+    def _redraw_all(self):
+        """清空 + 全量重画 _all_lines（按当前 _show_levels 过滤）。
+        给 showEvent / filter 切换共用。"""
+        self._text.clear()
+        self._pending.clear()
+        chunks = []
+        for level, line in self._all_lines:
+            if self._show_levels.get(level, True):
+                color = LEVEL_COLOR.get(level, "#d0d0d0")
+                safe = (line.replace("&", "&amp;")
+                             .replace("<", "&lt;")
+                             .replace(">", "&gt;"))
+                chunks.append(f'<span style="color:{color}">{safe}</span>')
+        if chunks:
+            self._text.appendHtml("<br>".join(chunks))
+        self._dirty = False
+        if self._auto_scroll:
+            sb = self._text.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def showEvent(self, event):
+        """切回 log 页时把 hidden 期间漏掉的内容补上"""
+        super().showEvent(event)
+        if self._dirty:
+            self._redraw_all()
 
     def _on_filter_changed(self):
         self._show_levels["INFO"]     = self._cb_info.isChecked()
         self._show_levels["WARNING"]  = self._cb_warn.isChecked()
         self._show_levels["ERROR"]    = self._cb_error.isChecked()
         self._show_levels["CRITICAL"] = self._cb_error.isChecked()
-        # 重画
-        self._text.clear()
-        for level, line in self._all_lines:
-            if self._show_levels.get(level, True):
-                self._append(level, line)
+        self._redraw_all()
 
     def _on_autoscroll_toggled(self, on: bool):
         self._auto_scroll = on
@@ -197,9 +244,13 @@ class LogPage(QWidget):
     # ─────────── 生命周期 ───────────
 
     def detach(self):
-        """从 root logger 摘掉 handler（避免应用关闭后还接日志）"""
+        """从 root logger 摘掉 handler（避免应用关闭后还接日志）+ 停定时器"""
         try:
             logging.getLogger().removeHandler(self._handler)
+        except Exception:
+            pass
+        try:
+            self._flush_timer.stop()
         except Exception:
             pass
 

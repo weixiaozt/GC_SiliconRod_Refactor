@@ -47,6 +47,16 @@ from PyQt6.QtWidgets import (
 _DEFAULT_CLASSES = ["隐裂", "崩边", "其他", "脏污", "线痕", "拼缝", "OK", "缺口"]
 
 
+def _style_spin(sp):
+    """统一表格内 spin box 显示：足够宽 + 居中 + 内边距 — 防上下箭头把数字挤掉
+    （之前 "100.0" 会被显示成 "100 0"，小数点被箭头压住）"""
+    sp.setMinimumWidth(110)
+    sp.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    sp.setStyleSheet(
+        "QAbstractSpinBox { padding-right: 18px; padding-left: 4px; }"
+    )
+
+
 class JudgePage(QWidget):
     """参数设置页"""
 
@@ -203,6 +213,7 @@ class JudgePage(QWidget):
         sp_ma.setRange(0, 1e9)
         sp_ma.setDecimals(1)
         sp_ma.setValue(float(row_data.get("max_area", 1e6)))
+        _style_spin(sp_ma)
         self._table.setCellWidget(r, 2, sp_ma)
 
         # 3: max_length
@@ -210,12 +221,14 @@ class JudgePage(QWidget):
         sp_ml.setRange(0, 1e9)
         sp_ml.setDecimals(2)
         sp_ml.setValue(float(row_data.get("max_length", 1e6)))
+        _style_spin(sp_ml)
         self._table.setCellWidget(r, 3, sp_ml)
 
         # 4: max_count
         sp_mc = QSpinBox()
         sp_mc.setRange(0, 1_000_000)
         sp_mc.setValue(int(row_data.get("max_count", 1000)))
+        _style_spin(sp_mc)
         self._table.setCellWidget(r, 4, sp_mc)
 
         # 5: min_confidence
@@ -224,6 +237,7 @@ class JudgePage(QWidget):
         sp_conf.setDecimals(2)
         sp_conf.setSingleStep(0.05)
         sp_conf.setValue(float(row_data.get("min_confidence", 0.0)))
+        _style_spin(sp_conf)
         self._table.setCellWidget(r, 5, sp_conf)
 
     def _read_table(self) -> List[dict]:
