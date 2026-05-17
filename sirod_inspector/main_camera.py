@@ -772,67 +772,34 @@ class SiRodCameraApp(QObject):
                 logger.error(f"显示 NG 弹窗失败: {e}", exc_info=True)
 
     def _show_ng_popup(self, data: InspectData):
-        """非阻塞 NG 弹窗 — 已有弹窗在屏时只更新内容，不再堆叠。
+        """NG 报警 — 现在走顶部状态栏 + 串口报警灯（已存在），不再弹窗。
 
-        历史 bug：以前用 msg.exec()（modal 阻塞）。第一棒 NG 弹窗用户没点 →
-        第二棒 NG 又触发 _show_ng_popup → 新 exec 嵌套在旧 exec 的事件循环
-        里 → 多层嵌套 + 多个 modal 堆叠，UI 主线程被 NESTED EXEC 长期占用，
-        Windows 标题栏 "（未响应）"。
+        历史 bug 演进：
+          iter27 之前：QMessageBox.exec() modal 阻塞，多 NG 堆叠 → UI 卡
+          iter27 改 show() 非阻塞 + dedup 累积 informativeText
+          → 用户实测：popup 自己 "未响应"（窗口标题）
+          → 原因：每 NG 都 append 文本 + QMessageBox 每次 setInformativeText
+            重排所有累积文本 + 自适应调整窗口大小 + 重画。14 NG 累积下
+            popup 自身事件循环跟不上自己的重排 race。
 
-        修复：show() 非阻塞 + 已有 popup 时只 update 内容 + 自动清理。
+        根本解决：不再弹任何 popup。NG 报警的功能由这些渠道承担：
+          - 顶部右侧状态徽章变红 + "NG: 棒号 / 类型"，operator 一眼看见
+          - 总览右上"NG 数量"计数器实时累加
+          - 串口报警灯硬件输出（serial_manager.send_ng() 仍照常）
+          - 缺陷图库 tab 自动 add_defect（NG 全留档）
+          - log 文件
+        不需要每棒一次手动 ACK。批量 NG 时 operator 看状态徽章 +
+        图库 tab 自查即可。
         """
-        existing = getattr(self, "_ng_popup", None)
-        if existing is not None and existing.isVisible():
-            # 已有 NG popup 在屏 — 只更新内容，不再开新窗口（避免堆叠）
-            try:
-                detail = [f"棒号：{data.rod_id or '未知'}"]
-                if data.defect_type:
-                    detail.append(f"缺陷类型：{data.defect_type}")
-                if data.defect_count:
-                    detail.append(f"缺陷数量：{data.defect_count}")
-                # 把最新一棒 NG 拼到 informativeText 上方（顶部最新）
-                old = existing.informativeText() or ""
-                existing.setInformativeText(
-                    f"[最新 {data.timestamp or ''}] " + " ".join(detail)
-                    + ("\n\n" + old if old else "")
-                )
-            except Exception as e:
-                logger.warning(f"更新 NG popup 内容失败: {e}")
-            return
-
-        msg = QMessageBox(self.window)
-        msg.setWindowTitle("NG 报警")
-        msg.setIcon(QMessageBox.Icon.Warning)
-        msg.setText("<div style='font-size:18px;font-weight:bold;color:#e74c3c'>"
-                    "检测NG棒</div>")
-        detail_lines = [f"棒号：{data.rod_id or '未知'}"]
-        if data.defect_type:
-            detail_lines.append(f"缺陷类型：{data.defect_type}")
-        if data.defect_count:
-            detail_lines.append(f"缺陷数量：{data.defect_count}")
-        msg.setInformativeText("\n".join(detail_lines))
-
-        reset_btn = msg.addButton("复 位", QMessageBox.ButtonRole.AcceptRole)
-        msg.addButton("关 闭", QMessageBox.ButtonRole.RejectRole)
-        # 显式非 modal — QMessageBox 默认 WindowModal 会拦截父窗口输入。
-        # setModal(False) 等价 setWindowModality(NonModal)，但显式更保险。
-        msg.setWindowModality(Qt.WindowModality.NonModal)
-        msg.setModal(False)
-        # finished 信号在用户点按钮 / 关窗时触发，避免引用泄漏
-        msg.finished.connect(
-            lambda _r, m=msg, rb=reset_btn: self._on_ng_popup_closed(m, rb)
-        )
-        self._ng_popup = msg       # 持引用防 GC
-        msg.show()
-
-    def _on_ng_popup_closed(self, msg, reset_btn):
         try:
-            if msg.clickedButton() is reset_btn:
-                self._on_reset_clicked()
-        finally:
-            if getattr(self, "_ng_popup", None) is msg:
-                self._ng_popup = None
-            msg.deleteLater()
+            badge_text = f"NG: {data.rod_id or 'NoRead'}"
+            if data.defect_type:
+                badge_text += f" / {data.defect_type}"
+            if hasattr(self.window, "set_status_badge"):
+                # 红底，operator 一目了然
+                self.window.set_status_badge(badge_text, "#e74c3c")
+        except Exception as e:
+            logger.warning(f"更新 NG 状态徽章失败: {e}")
 
     def _on_reset_clicked(self):
         """处理复位请求 — 错误反馈走状态栏 / log，不再用 modal popup。
