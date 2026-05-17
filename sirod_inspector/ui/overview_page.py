@@ -713,9 +713,26 @@ class OverviewPage(QWidget):
                 " font-weight: bold; border-radius: 3px;"
             )
 
-        # 显示图像
-        if data.image is not None:
-            self._display_image(data.image)
+        # 显示图像 — 优先用带 mask + bbox + 类别名的 marked 图，
+        # 没 detection_result 时退回 raw（兼容老调用方 / 手动塞图场景）
+        display_img = data.image
+        dr = getattr(data, "_detection_result", None)
+        if dr is not None and display_img is not None:
+            try:
+                from sirod_inspector.algorithm.overlay import draw_marked_full
+                display_img = draw_marked_full(
+                    dr.processed_image if dr.processed_image is not None else data.image,
+                    dr.label_map,
+                    dr.defects,
+                    getattr(dr, "seg_class_names", None),
+                    # ng_trigger_classes=None → draw_marked_full 默认 {"隐裂"}
+                )
+            except Exception as e:
+                logger.warning(f"画 marked 图失败，退回 raw: {e}")
+                display_img = data.image
+
+        if display_img is not None:
+            self._display_image(display_img)
 
         logger.info(
             f"总览更新: total={self._total}, ok={self._ok_count}, "
