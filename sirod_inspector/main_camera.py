@@ -49,7 +49,7 @@ logger.info("=" * 60)
 # ── 导入模块 ──
 try:
     from PyQt6.QtWidgets import QApplication, QMessageBox
-    from PyQt6.QtCore import QTimer, pyqtSignal, QObject
+    from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
     from PyQt6.QtGui import QIcon
 
     from data.config import AppConfig
@@ -814,7 +814,10 @@ class SiRodCameraApp(QObject):
 
         reset_btn = msg.addButton("复 位", QMessageBox.ButtonRole.AcceptRole)
         msg.addButton("关 闭", QMessageBox.ButtonRole.RejectRole)
-        msg.setModal(False)        # 非 modal，不嵌套事件循环
+        # 显式非 modal — QMessageBox 默认 WindowModal 会拦截父窗口输入。
+        # setModal(False) 等价 setWindowModality(NonModal)，但显式更保险。
+        msg.setWindowModality(Qt.WindowModality.NonModal)
+        msg.setModal(False)
         # finished 信号在用户点按钮 / 关窗时触发，避免引用泄漏
         msg.finished.connect(
             lambda _r, m=msg, rb=reset_btn: self._on_ng_popup_closed(m, rb)
@@ -832,6 +835,13 @@ class SiRodCameraApp(QObject):
             msg.deleteLater()
 
     def _on_reset_clicked(self):
+        """处理复位请求 — 错误反馈走状态栏 / log，不再用 modal popup。
+
+        历史 bug：失败时 QMessageBox.warning(...) 是 modal exec()，被
+        NG popup 内的"复位"按钮触发后立刻把 UI 阻塞 → 用户点任意位置
+        都未响应（因为 modal popup 拦截所有输入，且 nested 在另一个
+        popup 的 finished 信号回调里）。
+        """
         logger.info("用户触发复位")
         try:
             ok = self.serial_manager.send_reset()
@@ -839,11 +849,16 @@ class SiRodCameraApp(QObject):
                 if hasattr(self.window, "set_status_badge"):
                     self.window.set_status_badge("已复位", "#27ae60")
             else:
-                QMessageBox.warning(self.window, "复位失败",
-                                     "串口未打开或发送失败，请检查串口设置。")
+                # 状态栏 + log 提示，不弹 modal
+                logger.warning("复位失败：串口未打开或发送失败")
+                if hasattr(self.window, "set_status_badge"):
+                    self.window.set_status_badge(
+                        "复位失败 — 检查串口", "#e74c3c")
         except Exception as e:
             logger.error(f"复位失败: {e}", exc_info=True)
-            QMessageBox.critical(self.window, "复位异常", f"复位操作异常：\n{e}")
+            if hasattr(self.window, "set_status_badge"):
+                self.window.set_status_badge(
+                    f"复位异常: {type(e).__name__}", "#e74c3c")
 
     def _on_serial_settings_changed(self):
         logger.info("串口设置已更改，重新打开串口...")
