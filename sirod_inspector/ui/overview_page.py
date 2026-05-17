@@ -728,7 +728,16 @@ class OverviewPage(QWidget):
         )
 
     def _display_image(self, img_array: np.ndarray):
-        """将 numpy 数组显示到可缩放图像查看器"""
+        """将 numpy 数组显示到可缩放图像查看器。
+
+        ⚠ PyQt6 的 QImage(buffer, ...) 不持 numpy 数组引用。
+        函数返回后 img_array 被 GC → QImage 内 ptr 悬空 → 后续 paint
+        随机 segfault（进程崩，bash 显示 exit 127）。
+
+        修复：QImage 创建后立即 .copy() — Qt 内部拷一份独立内存，
+        和 numpy buffer 解耦。开销 ~3MB 拷贝（1024×3072 BGR），<5ms，
+        在 UI 显示路径上不致命。
+        """
         try:
             # 确保数组是连续内存布局
             img_array = np.ascontiguousarray(img_array)
@@ -744,9 +753,11 @@ class OverviewPage(QWidget):
                 h, w, ch = img_array.shape
                 if ch == 3:
                     bytes_per_line = 3 * w
+                    # BGR (OpenCV 默认) → 用 Format_BGR888 直接显示，
+                    # 不需要再做 cvtColor。之前用 Format_RGB888 → R/B 颠倒。
                     qimg = QImage(
                         img_array.data, w, h, bytes_per_line,
-                        QImage.Format.Format_RGB888,
+                        QImage.Format.Format_BGR888,
                     )
                 elif ch == 4:
                     bytes_per_line = 4 * w
@@ -761,6 +772,8 @@ class OverviewPage(QWidget):
                 logger.warning(f"不支持的图像维度: {img_array.ndim}")
                 return
 
+            # 关键：copy() — 让 Qt 独立持有像素数据，不依赖 numpy 生命周期
+            qimg = qimg.copy()
             pixmap = QPixmap.fromImage(qimg)
             self._image_viewer.set_image(pixmap)
 
