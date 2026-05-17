@@ -1010,32 +1010,53 @@ def _acquire_single_instance_lock():
     任何一项 race 都能导致 UI 阻塞或数据损坏。
 
     Windows 用 msvcrt.locking 锁一个 lockfile；POSIX 用 fcntl.flock。
-    被锁文件留在 logs/ 下，进程退出时 OS 自动释放。
-    返回锁文件句柄（要在进程 lifetime 内持有，否则 GC 释放锁）。
     """
     lock_path = os.path.join(_log_dir, "main_camera.lock")
     os.makedirs(_log_dir, exist_ok=True)
-    try:
-        fh = open(lock_path, "w")
-        if sys.platform == "win32":
-            import msvcrt
-            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _try_acquire():
+        # "a+" 模式：文件存在则追加，不存在则创建。比 "w" 不会因为
+        # Windows 文件元数据未清完报 EACCES。
+        fh = open(lock_path, "a+")
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, IOError):
+            fh.close()
+            raise
+        fh.seek(0)
+        fh.truncate()
         fh.write(f"pid={os.getpid()}\n")
         fh.flush()
         return fh
-    except (OSError, IOError) as e:
+
+    # 主路径
+    try:
+        return _try_acquire()
+    except (OSError, IOError) as e1:
+        # 可能是"幽灵 lock 文件"（前一进程强杀后 OS 释放了锁但文件残留 +
+        # Windows 文件 metadata 还没清）。尝试删掉再试一次。
         try:
-            fh.close()
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"已有一个 SiRod Inspector 实例在跑（锁文件 {lock_path}）。\n"
-            f"请先关掉旧实例（任务管理器找 python）再启动。\n"
-            f"底层错误: {e}"
-        )
+            os.remove(lock_path)
+        except OSError:
+            # 删不掉 = 真有进程持有，确实是多开
+            raise RuntimeError(
+                f"已有一个 SiRod Inspector 实例在跑（锁文件 {lock_path}）。\n"
+                f"请先关掉旧实例（任务管理器找 python）再启动。\n"
+                f"底层错误: {e1}"
+            )
+        # 删成功 → 重试 acquire
+        try:
+            return _try_acquire()
+        except (OSError, IOError) as e2:
+            raise RuntimeError(
+                f"无法获取单实例锁（{lock_path}）。\n"
+                f"底层错误: {e2}"
+            )
 
 
 def main():
