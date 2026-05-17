@@ -11,3 +11,12 @@ source_image/*.zip
 source_image/*.zip.*
 source_image/*.tif
 source_image/ImageRaw/
+
+# 部署 zip — 33MB 二进制，按需重新打包（python scripts/deploy/build_zip.py）
+SiliconRod_v2_deploy.zip
+
+# 测试图（414 张 .bmp，太大）
+test_image/*.bmp
+
+# 运行时数据 — 不同部署机各自生成
+sirod_inspector/shift_stats.json
