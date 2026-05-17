@@ -456,25 +456,46 @@ class InspectEngine:
         def _loop():
             logger.info(f"运行循环已启动: interval={interval_s}s, "
                          f"event={'on' if trigger_event else 'off'}")
-            while not self._loop_stop.is_set():
-                # 外部触发模式
-                if trigger_event is not None:
-                    if not trigger_event.wait(timeout=1.0):
-                        continue
-                    trigger_event.clear()
+            try:
+                iter_no = 0
+                while not self._loop_stop.is_set():
+                    # 外部触发模式
+                    if trigger_event is not None:
+                        if not trigger_event.wait(timeout=1.0):
+                            continue
+                        trigger_event.clear()
 
-                t0 = time.perf_counter()
-                self.trigger_once()
-                elapsed = time.perf_counter() - t0
+                    iter_no += 1
+                    logger.info(f"[WORKER_HB] iter={iter_no} 开始 trigger_once")
+                    t0 = time.perf_counter()
+                    try:
+                        self.trigger_once()
+                    except Exception as inner:
+                        # trigger_once 已经有 try/except 兜异常，这里再兜一层
+                        # 防止任何漏网之鱼把整个 worker 线程杀掉静默退出。
+                        logger.error(
+                            f"trigger_once 抛出未处理异常（loop 继续）: {inner}",
+                            exc_info=True)
+                    elapsed = time.perf_counter() - t0
+                    logger.info(
+                        f"[WORKER_HB] iter={iter_no} 结束 elapsed={elapsed*1000:.0f}ms")
 
-                # 自适应等待：不够的间隔补齐，多了就立即下一轮
-                if trigger_event is None:
-                    remain = interval_s - elapsed
-                    if remain > 0:
-                        # 用 stop 事件 wait 以便能立即响应 stop
-                        if self._loop_stop.wait(timeout=remain):
-                            break
-            logger.info("运行循环已退出")
+                    # 自适应等待：不够的间隔补齐，多了就立即下一轮
+                    if trigger_event is None:
+                        remain = interval_s - elapsed
+                        if remain > 0:
+                            # 用 stop 事件 wait 以便能立即响应 stop
+                            if self._loop_stop.wait(timeout=remain):
+                                break
+            except BaseException as fatal:
+                # 包括 SystemExit / KeyboardInterrupt 在内的"严重"异常 — 必须 log
+                # 否则 daemon 线程死了上层完全不知道，看起来就是"卡住了"
+                logger.critical(
+                    f"运行循环异常退出（daemon 线程死了，没人接管）: {fatal}",
+                    exc_info=True)
+                raise
+            finally:
+                logger.info("运行循环已退出")
 
         self._loop_thread = threading.Thread(
             target=_loop, daemon=True, name="InspectEngineLoop",
