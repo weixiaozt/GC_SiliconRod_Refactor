@@ -46,7 +46,10 @@ def _new_init(self, uid: int = 0, **kwargs):
     self.serial = "MOCK001"
     self._streaming = False
     # 只挑 .bmp（.zip 是训练图压缩包，.jpg 不是棒图）
-    self._image_paths = sorted(_TEST_IMAGE_DIR.glob("*.bmp"))
+    import os
+    limit = int(os.environ.get("DEMO_IMAGE_LIMIT", "0"))  # 0 = 全部
+    all_paths = sorted(_TEST_IMAGE_DIR.glob("*.bmp"))
+    self._image_paths = all_paths[:limit] if limit > 0 else all_paths
     if not self._image_paths:
         raise RuntimeError(f"未找到 test_image/*.bmp，路径: {_TEST_IMAGE_DIR}")
     self._idx = 0
@@ -87,10 +90,20 @@ def _new_trigger_and_grab(self, timeout_ms: int = 5000):
 
 
 def _quit_after_one_lap(lap: int, n_images: int):
-    """跑完 1 圈不清盘 — 退出 Qt"""
+    """跑完 1 圈 — 异步通知 UI 线程退出 Qt（不阻塞 worker 线程）。
+
+    ★ 不能在 worker 线程直接调 QCoreApplication.quit()，会跟 UI 线程
+    死锁：worker 持 GIL 调 Qt C++，Qt C++ 要等 UI 线程的 event queue
+    mutex，UI 线程要等 GIL 才能处理 Python 信号槽 → 循环等待。
+    实测：worker iter=10 callback 调 quit() 后 worker 永远不出来，
+    UI 心跳也停了，整个进程僵死。
+
+    改成 QMetaObject.invokeMethod 异步 post 一个 "quit" 调用到 UI 线程
+    队列，worker 不等。UI 线程在下一次事件循环 iter 里取走执行。
+    """
     print()
     print("=" * 60)
-    print(f"[OneLap] 第 {lap} 圈完成（{n_images} 张），退出 Qt")
+    print(f"[OneLap] 第 {lap} 圈完成（{n_images} 张），通知 UI 退出")
     print(f"[OneLap] 存图保留在 D:\\SiRod\\，供训练用：")
     print(f"  - crops/raw/   小图原图（训练用）")
     print(f"  - crops/marked/ 小图标注（看效果）")
@@ -98,10 +111,13 @@ def _quit_after_one_lap(lap: int, n_images: int):
     print(f"  - full/marked/ 大图标注")
     print("=" * 60)
     try:
-        from PyQt6.QtCore import QCoreApplication
-        QCoreApplication.quit()
+        from PyQt6.QtCore import QCoreApplication, QMetaObject, Qt
+        app = QCoreApplication.instance()
+        if app is not None:
+            QMetaObject.invokeMethod(
+                app, "quit", Qt.ConnectionType.QueuedConnection)
     except Exception as e:
-        print(f"[OneLap] Qt quit 异常: {e}")
+        print(f"[OneLap] post quit 异常: {e}")
 
 
 # Monkey-patch demo 模块
