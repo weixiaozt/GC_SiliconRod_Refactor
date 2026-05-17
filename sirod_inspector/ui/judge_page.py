@@ -163,6 +163,9 @@ class JudgePage(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Fixed)
         self._table.setColumnWidth(1, 60)
+        # 行高 36 — 默认 ~25 会把 spin box 数字的底半截（含小数点）剪掉，
+        # 用户截图里"100.0"显示成"100 0"就是这个原因
+        self._table.verticalHeader().setDefaultSectionSize(36)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
