@@ -1016,8 +1016,61 @@ def _global_exception_handler(exc_type, exc_value, exc_tb):
                      exc_info=(exc_type, exc_value, exc_tb))
 
 
+def _acquire_single_instance_lock():
+    """单实例锁 — 防多开。
+
+    多个 main_camera 同时跑会撞：
+      - 同时 chdir 到 EasyLabel/DeepLearning（cwd 是进程全局）
+      - 同时加载 dnninfer.dll / BVCam.dll（DLL 状态全局）
+      - 同时写 D:/SiRod 同一份文件名
+      - 同时 append 同一个 log
+      - 同时抢同一相机 USB / GigE 资源
+    任何一项 race 都能导致 UI 阻塞或数据损坏。
+
+    Windows 用 msvcrt.locking 锁一个 lockfile；POSIX 用 fcntl.flock。
+    被锁文件留在 logs/ 下，进程退出时 OS 自动释放。
+    返回锁文件句柄（要在进程 lifetime 内持有，否则 GC 释放锁）。
+    """
+    lock_path = os.path.join(_log_dir, "main_camera.lock")
+    os.makedirs(_log_dir, exist_ok=True)
+    try:
+        fh = open(lock_path, "w")
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fh.write(f"pid={os.getpid()}\n")
+        fh.flush()
+        return fh
+    except (OSError, IOError) as e:
+        try:
+            fh.close()
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"已有一个 SiRod Inspector 实例在跑（锁文件 {lock_path}）。\n"
+            f"请先关掉旧实例（任务管理器找 python）再启动。\n"
+            f"底层错误: {e}"
+        )
+
+
 def main():
     sys.excepthook = _global_exception_handler
+
+    # 单实例锁 — 必须在 QApplication 之前（防止重复启 PyQt）
+    try:
+        _lock_fh = _acquire_single_instance_lock()
+    except RuntimeError as e:
+        logger.error(str(e))
+        # 弹一个最小窗口提示用户
+        try:
+            tmp_app = QApplication(sys.argv)
+            QMessageBox.critical(None, "已有实例在跑", str(e))
+        except Exception:
+            print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
 
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLE)
@@ -1032,7 +1085,11 @@ def main():
 
     app.aboutToQuit.connect(controller.stop)
     logger.info("进入事件循环")
-    sys.exit(app.exec())
+    try:
+        return app.exec()
+    finally:
+        # 显式持引用到 main 结束 — 避免 lock_fh 被 GC 提前释放
+        del _lock_fh
 
 
 if __name__ == "__main__":
