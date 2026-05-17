@@ -474,6 +474,15 @@ class SiRodCameraApp(QObject):
         self._shift_timer.timeout.connect(self._check_shift_reset)
         self._shift_timer.start(30_000)
 
+        # UI 心跳：每秒一行 log，便于诊断 UI 线程是否被阻塞
+        # 若 log 中两个 [UI_HB] 间隔 > 1.5s，说明 UI 线程曾经被阻
+        # （定时器是 UI 线程上的 QTimer，UI 卡住 → 心跳停）
+        self._heartbeat_timer = QTimer()
+        self._heartbeat_timer.timeout.connect(
+            lambda: logger.info(f"[UI_HB] {time.time():.1f}")
+        )
+        self._heartbeat_timer.start(1000)
+
         # 底部状态灯 tooltip — main_camera 模式下灯的语义跟 main.py 不同，
         # 复用同一组位置但加 tooltip 说明
         try:
@@ -763,6 +772,34 @@ class SiRodCameraApp(QObject):
                 logger.error(f"显示 NG 弹窗失败: {e}", exc_info=True)
 
     def _show_ng_popup(self, data: InspectData):
+        """非阻塞 NG 弹窗 — 已有弹窗在屏时只更新内容，不再堆叠。
+
+        历史 bug：以前用 msg.exec()（modal 阻塞）。第一棒 NG 弹窗用户没点 →
+        第二棒 NG 又触发 _show_ng_popup → 新 exec 嵌套在旧 exec 的事件循环
+        里 → 多层嵌套 + 多个 modal 堆叠，UI 主线程被 NESTED EXEC 长期占用，
+        Windows 标题栏 "（未响应）"。
+
+        修复：show() 非阻塞 + 已有 popup 时只 update 内容 + 自动清理。
+        """
+        existing = getattr(self, "_ng_popup", None)
+        if existing is not None and existing.isVisible():
+            # 已有 NG popup 在屏 — 只更新内容，不再开新窗口（避免堆叠）
+            try:
+                detail = [f"棒号：{data.rod_id or '未知'}"]
+                if data.defect_type:
+                    detail.append(f"缺陷类型：{data.defect_type}")
+                if data.defect_count:
+                    detail.append(f"缺陷数量：{data.defect_count}")
+                # 把最新一棒 NG 拼到 informativeText 上方（顶部最新）
+                old = existing.informativeText() or ""
+                existing.setInformativeText(
+                    f"[最新 {data.timestamp or ''}] " + " ".join(detail)
+                    + ("\n\n" + old if old else "")
+                )
+            except Exception as e:
+                logger.warning(f"更新 NG popup 内容失败: {e}")
+            return
+
         msg = QMessageBox(self.window)
         msg.setWindowTitle("NG 报警")
         msg.setIcon(QMessageBox.Icon.Warning)
@@ -777,10 +814,22 @@ class SiRodCameraApp(QObject):
 
         reset_btn = msg.addButton("复 位", QMessageBox.ButtonRole.AcceptRole)
         msg.addButton("关 闭", QMessageBox.ButtonRole.RejectRole)
-        msg.exec()
+        msg.setModal(False)        # 非 modal，不嵌套事件循环
+        # finished 信号在用户点按钮 / 关窗时触发，避免引用泄漏
+        msg.finished.connect(
+            lambda _r, m=msg, rb=reset_btn: self._on_ng_popup_closed(m, rb)
+        )
+        self._ng_popup = msg       # 持引用防 GC
+        msg.show()
 
-        if msg.clickedButton() is reset_btn:
-            self._on_reset_clicked()
+    def _on_ng_popup_closed(self, msg, reset_btn):
+        try:
+            if msg.clickedButton() is reset_btn:
+                self._on_reset_clicked()
+        finally:
+            if getattr(self, "_ng_popup", None) is msg:
+                self._ng_popup = None
+            msg.deleteLater()
 
     def _on_reset_clicked(self):
         logger.info("用户触发复位")
