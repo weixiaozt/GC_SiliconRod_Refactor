@@ -176,17 +176,20 @@ def save_inspect_images(data: InspectData, detection_result,
         if _imwrite(full_raw_path, data.image, ".bmp"):
             paths['full_raw'] = full_raw_path
 
-        # 2. full / marked
+        # 2. full / marked — 优先复用 main_camera 已经预画好的 marked
+        # （挂在 data._marked_image），避免后台 save 又画一次 100ms
         if detection_result is not None:
-            marked = draw_marked_full(
-                detection_result.processed_image
-                    if detection_result.processed_image is not None
-                    else data.image,
-                detection_result.label_map,
-                detection_result.defects,
-                detection_result.seg_class_names,
-                ng_trigger_classes=ng_trigger_classes,
-            )
+            marked = getattr(data, "_marked_image", None)
+            if marked is None:
+                marked = draw_marked_full(
+                    detection_result.processed_image
+                        if detection_result.processed_image is not None
+                        else data.image,
+                    detection_result.label_map,
+                    detection_result.defects,
+                    detection_result.seg_class_names,
+                    ng_trigger_classes=ng_trigger_classes,
+                )
             full_marked_path = os.path.join(
                 base_dir, today, "full", "marked",
                 data.result, f"{stem}.png")
@@ -609,11 +612,15 @@ class SiRodCameraApp(QObject):
 
     # ─────────── 检测数据回调 ───────────
     def _on_inspect_data(self, data: InspectData, detection_result=None):
-        """工作线程上：仅做日志和信号转发。
+        """工作线程上：日志 + 预渲染 marked 图 + 信号转发。
 
         ``detection_result`` 是 algorithm 层完整产物（含 label_map / crops），
         通过 InspectEngine 传过来。本地通过临时 attribute 挂到 data 上，
         让 UI 线程的 ``_handle_inspect_data`` 能拿到（不污染对外契约）。
+
+        ⚠ marked 图（mask + bbox + PIL 中文文字）在 1024×3072 上画一次要
+        50-100ms。在 UI 线程画会卡 → 这里在工作线程预生成，UI 拿到现成图
+        直接显示。save 后台任务也复用同一份 marked 避免重复工作。
         """
         logger.info(
             f"检测完成: rod_id={data.rod_id}, result={data.result}, "
@@ -622,6 +629,23 @@ class SiRodCameraApp(QObject):
         )
         # 临时挂载完整 result（非 InspectData 正式字段，仅本进程内传递）
         data._detection_result = detection_result
+
+        # 工作线程上预生成 marked — UI 不再扛 draw_marked_full 的 100ms
+        data._marked_image = None
+        if detection_result is not None and data.image is not None:
+            try:
+                from sirod_inspector.algorithm.overlay import draw_marked_full
+                data._marked_image = draw_marked_full(
+                    detection_result.processed_image
+                        if detection_result.processed_image is not None
+                        else data.image,
+                    detection_result.label_map,
+                    detection_result.defects,
+                    getattr(detection_result, "seg_class_names", None),
+                )
+            except Exception as e:
+                logger.warning(f"预生成 marked 失败（UI 退回 raw）: {e}")
+
         self._inspect_data_signal.emit(data)
 
     def _handle_inspect_data(self, data: InspectData):

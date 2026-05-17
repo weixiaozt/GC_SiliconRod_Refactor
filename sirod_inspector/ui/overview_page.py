@@ -713,24 +713,12 @@ class OverviewPage(QWidget):
                 " font-weight: bold; border-radius: 3px;"
             )
 
-        # 显示图像 — 优先用带 mask + bbox + 类别名的 marked 图，
-        # 没 detection_result 时退回 raw（兼容老调用方 / 手动塞图场景）
-        display_img = data.image
-        dr = getattr(data, "_detection_result", None)
-        if dr is not None and display_img is not None:
-            try:
-                from sirod_inspector.algorithm.overlay import draw_marked_full
-                display_img = draw_marked_full(
-                    dr.processed_image if dr.processed_image is not None else data.image,
-                    dr.label_map,
-                    dr.defects,
-                    getattr(dr, "seg_class_names", None),
-                    # ng_trigger_classes=None → draw_marked_full 默认 {"隐裂"}
-                )
-            except Exception as e:
-                logger.warning(f"画 marked 图失败，退回 raw: {e}")
-                display_img = data.image
-
+        # 显示图像 — main_camera 已经在工作线程预渲染了 marked 挂到
+        # data._marked_image（避免 UI 线程扛 draw_marked_full 的 100ms 卡顿）。
+        # 没 marked 时退回 raw（兼容手动塞 InspectData 场景）。
+        # 显式 is None 检查 — `arr or fallback` 在 ndarray 多元素时 raise
+        marked = getattr(data, "_marked_image", None)
+        display_img = marked if marked is not None else data.image
         if display_img is not None:
             self._display_image(display_img)
 
