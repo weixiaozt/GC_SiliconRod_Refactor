@@ -1,0 +1,60 @@
+[project]
+name = "sirod-inspector"
+version = "0.2.0"
+description = "光伏单晶硅棒隐裂在线检测系统（Python 重构版，主用 main_camera.py 走 BV 相机 + 内置 Pipeline；保留 main.py 走 Halcon 兜底）"
+readme = "DEPLOY.md"
+license = { file = "LICENSE" }
+# 项目里实际验证过 3.10+；Python 3.14 太新（2026 上半年才稳定），mvtec-halcon
+# 等工业包未必有 wheel。这里收口到 3.10-3.13。
+requires-python = ">=3.10,<3.14"
+
+# 核心运行时依赖（main_camera.py 路径必装，对应 scripts/deploy/check_deps.py:136）
+# 不锁版本，让 uv.lock 负责再现性 — 业内推荐做法。
+dependencies = [
+    "PyQt6",
+    "numpy",
+    "opencv-python",
+    "Pillow",
+    "pymysql",
+    "requests",
+    "pyserial",
+    "psutil",
+    "matplotlib",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+# 老 Halcon 兜底路径才需要（main.py 通过 mvtec-halcon 收 TCP）。
+# 现场只跑 main_camera.py 时不用装。
+# 安装：uv sync --extra halcon
+halcon = ["mvtec-halcon"]
+
+# 开发期工具（lint / 测试 / 类型检查）。按需启用：uv sync --extra dev
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+# 入口快捷方式：`uv run sirod-camera` 等价于 `python sirod_inspector/main_camera.py`
+sirod-camera = "sirod_inspector.main_camera:main"
+sirod-halcon = "sirod_inspector.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sirod_inspector"]
+
+[tool.uv]
+# 优先用系统装的 Python（winget 装的 Python.Python.3.12，在 PATH 上）。
+# 避免重复装一份 standalone 3.12（uv 自带的会到 ~/AppData/Roaming/uv/python/，
+# 跟 winget 版并存浪费 ~70MB）。
+# 现场部署机用 pip install -r requirements.txt 流程（DEPLOY.md），不依赖 uv，
+# 这个偏好只影响开发机。
+python-preference = "system"
+
+[tool.uv.pip]
+# 用清华源（DEPLOY.md 部署机的同款，避免现场网络墙外被卡）
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"

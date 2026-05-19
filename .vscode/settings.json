@@ -1,0 +1,35 @@
+{
+    // ── Python 解释器 ──
+    // 让 VS Code 默认用项目 .venv 里的 Python，由 uv 管理。
+    // 团队成员 clone 仓库后跑 `uv sync` 即可自动得到这个解释器。
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+
+    // ── 终端自动激活 ──
+    // 在 VS Code 集成终端里自动切到 .venv，省得手敲 .\.venv\Scripts\activate
+    "python.terminal.activateEnvironment": true,
+    "python.terminal.activateEnvInCurrentTerminal": true,
+
+    // ── 测试 / lint / 类型 ──
+    // pytest 也走 .venv（uv sync --extra dev 装的）
+    "python.testing.pytestEnabled": true,
+    "python.testing.unittestEnabled": false,
+
+    // ── 编辑器细节 ──
+    // 项目里的中文注释、UI 文本很多，统一 UTF-8
+    "files.encoding": "utf8",
+    // .py / .pyi 用 4 空格缩进（PEP 8）
+    "[python]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.rulers": [88, 100]
+    },
+
+    // ── 文件排除（VS Code 资源管理器里不显示）──
+    // 这些目录平时不会去手动改
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.pyc": true,
+        ".venv": true,
+        "uv.lock": false
+    }
+}
