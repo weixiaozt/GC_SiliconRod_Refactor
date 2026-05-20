@@ -44,3 +44,11 @@ test_image/*.bmp
 
 # 运行时数据 — 不同部署机各自生成
 sirod_inspector/shift_stats.json
+
+# 启动器 exe（由 scripts/deploy/build_launcher.bat 按需打包，~7MB 二进制不入库）
+scripts/deploy/SiRodLauncher.exe
+# PyInstaller 打包中间产物
+.build_launcher/
+build/
+dist/
+*.spec

@@ -146,6 +146,9 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._nav_buttons):
             btn.setChecked(i == index)
+        page = self._stack.widget(index)
+        if hasattr(page, "refresh"):
+            page.refresh()
         logger.debug(f"切换到页面: {index}")
 
     # ─────────── 状态更新 ───────────
