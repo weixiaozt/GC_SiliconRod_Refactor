@@ -36,6 +36,10 @@ sirod_inspector/config.json.before-*
 # 项目根目录的 config.json（现场实际部署使用，含敏感数据，不入库）
 /config.json
 
+# sirod_inspector/config.json — 现装现场真实生产配置（含 DB 密码），改完直接拷现场，不入库
+# 模板见 config.example.json / config.v2.example.json
+sirod_inspector/config.json
+
 # 部署前 hash 校验生成的临时清单
 code_hash.txt
 
