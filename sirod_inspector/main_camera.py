@@ -70,6 +70,7 @@ try:
     from ui.settings_page import SettingsPage
     from ui.log_page import LogPage
     from ui.judge_page import JudgePage
+    from ui.camera_page import CameraPage
     from algorithm.judge import ClassRule, DEFAULT_CLASS_RULES
     from algorithm import JudgeConfig
 except ImportError as e:
@@ -358,6 +359,16 @@ class SiRodCameraApp(QObject):
         if not os.path.isabs(cls_path):
             cls_path = os.path.join(_PARENT_DIR, cls_path)
 
+        # MultiFrame 模式：config 里 camera.acquisition_mode="MultiFrame" + camera.acquisition_frame_count=N
+        # 时，相机一次软触发吐 N 帧，外部拼成 (N*height, width) 大图。
+        # 默认 SingleFrame —— 兼容老配置。
+        acq_mode = str(self.config.get("camera.acquisition_mode", "SingleFrame"))
+        acq_frame_count = self.config.get("camera.acquisition_frame_count", None)
+        if acq_frame_count is not None:
+            acq_frame_count = int(acq_frame_count)
+        # 对齐 Halcon BV_GrapImage:7184 wait_seconds(5)：多帧首帧后强制等待秒数
+        mf_first_wait = float(self.config.get("camera.multiframe_first_wait_s", 0.0))
+
         engine_cfg = InspectEngineConfig(
             camera_uid=0,
             width=int(self.config.get("camera.width", 1024)),
@@ -365,6 +376,9 @@ class SiRodCameraApp(QObject):
             exposure_us=self.config.get("camera.exposure_us", None),
             trigger_source=self.config.get("camera.trigger_source", "Software"),
             grab_timeout_ms=int(self.config.get("camera.grab_timeout_ms", 10000)),
+            acquisition_mode=acq_mode,
+            acquisition_frame_count=acq_frame_count,
+            multiframe_first_wait_s=mf_first_wait,
             seg_model=seg_path,
             cls_model=cls_path,
             judge_config=JudgeConfig(
@@ -375,6 +389,7 @@ class SiRodCameraApp(QObject):
             ),
             ng_trigger_classes=ng_classes,
             class_rules=class_rules,
+            pixels_per_mm=float(self.config.get("scale.pixels_per_mm", 0.0)),
         )
         logger.info(f"模型路径: seg={seg_path}  cls={cls_path}")
 
@@ -383,10 +398,12 @@ class SiRodCameraApp(QObject):
         self._rod_id_lock = threading.Lock()
 
         def _rod_id_provider() -> str:
-            # 消费式取扫码结果（与 Halcon Code_Tcp + 主循环 dequeue 行为一致）：
-            # 每次抓图前取走最新棒号；没扫到的话回退到 manual 值。
+            # ★ peek-then-confirm 模式（不在这里消费）★
+            # 每次抓图前只 peek 最新棒号；trigger 成功 + on_inspect 回调里
+            # 才 take_if(rod) 确认消费。这样 trigger 失败（编码器没转）时
+            # 扫到的棒号不会被白白消费 — 下次 trigger 仍能用上。
             if self.scanner is not None and self.scanner.is_running:
-                rod = self.scanner.take_rod_id()
+                rod = self.scanner.current_rod_id()
                 if rod and rod != "NoRead":
                     return rod
             with self._rod_id_lock:
@@ -418,6 +435,13 @@ class SiRodCameraApp(QObject):
         self.settings_page = SettingsPage(config=self.config)
         self.judge_page = JudgePage(config=self.config)
         self.log_page = LogPage()
+        # 相机参数页：reader / applier 注入 engine 的两个方法（bound methods，
+        # 调用时才执行 → 容忍此时 engine 还没 start。CameraPage 内部会处理未启动情况）
+        self.camera_page = CameraPage(
+            config=self.config,
+            reader=self.engine.read_camera_params,
+            applier=self.engine.apply_camera_params,
+        )
 
         for name, page in [
             ("overview", self.overview_page),
@@ -427,14 +451,21 @@ class SiRodCameraApp(QObject):
             ("settings", self.settings_page),
             ("judge",    self.judge_page),     # 顺序要跟 main_window 导航顺序对齐
             ("logs",     self.log_page),
+            ("camera",   self.camera_page),
         ]:
             self.window.add_page(name, page)
-        # main_camera 模式启用「参数」和「日志」导航按钮
+        # main_camera 模式启用「参数」「日志」「相机」导航按钮
         self.window.set_tab_visible("参数", True)
         self.window.set_tab_visible("日志", True)
+        self.window.set_tab_visible("相机", True)
         # 保存参数后提示重启
         try:
             self.judge_page.settings_saved.connect(self._on_judge_settings_saved)
+        except Exception:
+            pass
+        # 相机参数保存后日志一行 + 顺手刷新状态徽章（可选）
+        try:
+            self.camera_page.params_saved.connect(self._on_camera_params_saved)
         except Exception:
             pass
         logger.info("UI 页面已注册")
@@ -474,22 +505,41 @@ class SiRodCameraApp(QObject):
         self._shift_timer.timeout.connect(self._check_shift_reset)
         self._shift_timer.start(30_000)
 
-        # UI 心跳：每秒一行 log，便于诊断 UI 线程是否被阻塞
-        # 若 log 中两个 [UI_HB] 间隔 > 1.5s，说明 UI 线程曾经被阻
-        # （定时器是 UI 线程上的 QTimer，UI 卡住 → 心跳停）
+        # ★ Round 5 ★ MES 重试 timer：每 60s 后台 flush 失败队列
+        #   MES 失败的 NG 数据先入内存队列（cap 1000），timer 定期重试
+        self._mes_retry_timer = QTimer()
+        self._mes_retry_timer.timeout.connect(self._on_mes_retry_tick)
+        self._mes_retry_timer.start(60_000)
+
+        # UI 心跳：定时器每秒 tick，但 ★ Round 3 优化 ★ 默认只每 10s log 一行，
+        # 检测到 freeze (tick 间隔 > 1.5s) 时立即 log 警告。
+        # 比之前的"每秒一行 INFO" log 量降 10x（86400/天 → 8640/天）
+        self._last_hb_tick_t = time.time()
+        self._last_hb_log_t = time.time()
         self._heartbeat_timer = QTimer()
-        self._heartbeat_timer.timeout.connect(
-            lambda: logger.info(f"[UI_HB] {time.time():.1f}")
-        )
+        self._heartbeat_timer.timeout.connect(self._on_ui_heartbeat_tick)
         self._heartbeat_timer.start(1000)
 
-        # 底部状态灯 tooltip — main_camera 模式下灯的语义跟 main.py 不同，
-        # 复用同一组位置但加 tooltip 说明
+        # ★ Round 10 ★ OS 线程级 UI 卡顿检测器
+        # Round 8 _check_thread_hangs 跑在 QTimer 上，UI 一旦 hang 它自己也跑不了。
+        # 这里用 stdlib threading.Thread (daemon) 独立检测 _last_hb_tick_t 滞后情况，
+        # 即便 Qt 事件循环死了也能持续 log（前提：logger 是 thread-safe 的）。
+        self._ui_watchdog_stop = False
+        self._ui_watchdog_thread = threading.Thread(
+            target=self._ui_watchdog_loop,
+            name="ui-watchdog",
+            daemon=True,
+        )
+        self._ui_watchdog_thread.start()
+
+        # 底部状态灯 tooltip — Round 9 后扫码枪有了独立灯，飞书灯回归原义
         try:
             tip = {
                 "TCP":     "数据源/检测引擎在线状态",
+                "相机":     "工业相机连接 / 采集状态（掉电掉线转红）",
                 "Run.bat": "检测循环在持续触发（绿）/ 已停止（红）",
-                "飞书":     "扫码枪连接状态（main_camera 模式复用此灯）",
+                "扫码枪":   "扫码枪 TCP 连接 + 心跳",
+                "飞书":     "飞书消息同步状态",
                 "数据库":   "MySQL 数据库连接",
                 "报警灯":   "串口报警灯连接",
             }
@@ -636,6 +686,20 @@ class SiRodCameraApp(QObject):
             f"defect_type={data.defect_type}, defect_count={data.defect_count}, "
             f"ct={data.ct*1000:.0f}ms"
         )
+
+        # ★ peek-then-confirm 配套：trigger 成功了，确认消费 scanner 棒号 ★
+        # 只在 scanner 当前最新棒号 == 本次用的棒号时才消费 reset，
+        # 避免 trigger 期间扫到的下一根棒被误消费
+        if (self.scanner is not None
+                and data.rod_id
+                and data.rod_id != "NoRead"):
+            try:
+                consumed = self.scanner.take_if(data.rod_id)
+                if consumed:
+                    logger.debug(f"scanner 棒号已消费: {data.rod_id}")
+            except Exception as e:
+                logger.warning(f"scanner.take_if 异常（忽略）: {e}")
+
         # 临时挂载完整 result（非 InspectData 正式字段，仅本进程内传递）
         data._detection_result = detection_result
 
@@ -654,6 +718,38 @@ class SiRodCameraApp(QObject):
                 )
             except Exception as e:
                 logger.warning(f"预生成 marked 失败（UI 退回 raw）: {e}")
+
+        # ★ Round 1 优化 ★ 工作线程上也预生成 QImage (含 .copy())
+        # UI 线程只需要 QPixmap.fromImage(qimg) (~2ms)，省去 UI 线程的
+        # np.ascontiguousarray + QImage 构造 + .copy() 共 ~15-30ms
+        # QImage 在任意线程都能构造，QPixmap 必须 UI 线程，所以只这一段下放
+        data._marked_qimage = None
+        try:
+            arr_for_qimg = (data._marked_image if data._marked_image is not None
+                            else data.image)
+            if arr_for_qimg is not None:
+                from PyQt6.QtGui import QImage
+                import numpy as _np
+                arr_c = _np.ascontiguousarray(arr_for_qimg)
+                if arr_c.ndim == 2:
+                    h, w = arr_c.shape
+                    qfmt = QImage.Format.Format_Grayscale8
+                    bpl = w
+                elif arr_c.ndim == 3 and arr_c.shape[2] == 3:
+                    h, w, _ = arr_c.shape
+                    qfmt = QImage.Format.Format_BGR888
+                    bpl = 3 * w
+                elif arr_c.ndim == 3 and arr_c.shape[2] == 4:
+                    h, w, _ = arr_c.shape
+                    qfmt = QImage.Format.Format_RGBA8888
+                    bpl = 4 * w
+                else:
+                    raise ValueError(f"unsupported shape {arr_c.shape}")
+                # .copy() 让 Qt 持有独立内存，跟 numpy 解耦（修原 segfault 风险）
+                data._marked_qimage = QImage(
+                    arr_c.data, w, h, bpl, qfmt).copy()
+        except Exception as e:
+            logger.warning(f"预生成 QImage 失败（UI 退回 numpy 路径）: {e}")
 
         self._inspect_data_signal.emit(data)
 
@@ -674,10 +770,8 @@ class SiRodCameraApp(QObject):
                 alarm_enabled = True
 
             if alarm_enabled:
-                try:
-                    self.serial_manager.send_ng()
-                except Exception as e:
-                    logger.error(f"发送 NG 串口信号失败: {e}", exc_info=True)
+                # ★ Round 2 优化 ★ 串口写异步化 — pyserial timeout=1 最长卡 UI 1s
+                self._fire_serial_async("send_ng")
             else:
                 logger.info("报警已禁用，跳过 NG 串口信号发送")
 
@@ -715,7 +809,22 @@ class SiRodCameraApp(QObject):
                         data.raw_json['图片路径'] = web_url
                     if image_path and data.result == "NG":
                         try:
-                            app.gallery_page.update_image(data.rod_id, image_path)
+                            # ★ Round 6 ★ bg 线程预生成 thumbnail（复用 round 1
+                            # 已经做好的 _marked_qimage scale 一下），UI 线程只 fromImage
+                            thumb = None
+                            marked_qimg = getattr(data, "_marked_qimage", None)
+                            if marked_qimg is not None:
+                                try:
+                                    from PyQt6.QtCore import Qt as _Qt
+                                    thumb = marked_qimg.scaled(
+                                        208, 170,
+                                        _Qt.AspectRatioMode.KeepAspectRatio,
+                                        _Qt.TransformationMode.SmoothTransformation,
+                                    )
+                                except Exception:
+                                    thumb = None
+                            app.gallery_page.update_image(
+                                data.rod_id, image_path, thumb)
                         except Exception as e:
                             logger.warning(f"更新缺陷图库图片失败: {e}")
 
@@ -758,6 +867,12 @@ class SiRodCameraApp(QObject):
                     except Exception as e:
                         logger.error(f"MES 上传异常: {e}", exc_info=True)
                         success, msg = False, f"异常: {type(e).__name__}"
+                    # ★ Round 5 ★ 推 MES 失败 → 入重试队列，后台 QTimer 定期 flush
+                    if not success:
+                        try:
+                            app.http_client.enqueue_retry(data)
+                        except Exception as e:
+                            logger.warning(f"MES 重试入队失败（忽略）: {e}")
                     app._mes_status_signal.emit(success, data.rod_id or "", msg)
 
         task = _BackgroundTask(data, self)
@@ -772,34 +887,86 @@ class SiRodCameraApp(QObject):
                 logger.error(f"显示 NG 弹窗失败: {e}", exc_info=True)
 
     def _show_ng_popup(self, data: InspectData):
-        """NG 报警 — 现在走顶部状态栏 + 串口报警灯（已存在），不再弹窗。
+        """NG 报警弹窗 — **非阻塞、单实例**
 
-        历史 bug 演进：
-          iter27 之前：QMessageBox.exec() modal 阻塞，多 NG 堆叠 → UI 卡
-          iter27 改 show() 非阻塞 + dedup 累积 informativeText
-          → 用户实测：popup 自己 "未响应"（窗口标题）
-          → 原因：每 NG 都 append 文本 + QMessageBox 每次 setInformativeText
-            重排所有累积文本 + 自适应调整窗口大小 + 重画。14 NG 累积下
-            popup 自身事件循环跟不上自己的重排 race。
+        历史踩坑：
+          - 直接 ``msg.exec()`` modal 阻塞 + 多 NG 堆叠 → UI 卡死
+          - ``msg.show()`` + 每次 append informativeText 累积 → 文本/重排 race UI 卡
 
-        根本解决：不再弹任何 popup。NG 报警的功能由这些渠道承担：
-          - 顶部右侧状态徽章变红 + "NG: 棒号 / 类型"，operator 一眼看见
-          - 总览右上"NG 数量"计数器实时累加
-          - 串口报警灯硬件输出（serial_manager.send_ng() 仍照常）
-          - 缺陷图库 tab 自动 add_defect（NG 全留档）
-          - log 文件
-        不需要每棒一次手动 ACK。批量 NG 时 operator 看状态徽章 +
-        图库 tab 自查即可。
+        现版本策略（单实例）：
+          - 只维护**一个** popup 引用 ``self._ng_popup``
+          - 新 NG 来时：
+            * popup 不存在 / 已关闭 → 新建并 ``show()``（非阻塞）
+            * popup 还在屏幕上 → **只刷新文本**，不再 new 一个，不累积
+          - 复位按钮 → 发串口 reset + 关 popup
+          - 关闭按钮 → 关 popup
+          - 顶部状态徽章 + 串口报警灯 + 图库继续照旧
         """
+        # 1) 更新状态徽章（红底，operator 一目了然）
         try:
             badge_text = f"NG: {data.rod_id or 'NoRead'}"
             if data.defect_type:
                 badge_text += f" / {data.defect_type}"
             if hasattr(self.window, "set_status_badge"):
-                # 红底，operator 一目了然
                 self.window.set_status_badge(badge_text, "#e74c3c")
         except Exception as e:
             logger.warning(f"更新 NG 状态徽章失败: {e}")
+
+        # 2) 准备弹窗内容
+        detail_lines = [f"棒号：{data.rod_id or '未知'}"]
+        if data.defect_type:
+            detail_lines.append(f"缺陷类型：{data.defect_type}")
+        if data.defect_count:
+            detail_lines.append(f"缺陷数量：{data.defect_count}")
+        if data.max_length:
+            detail_lines.append(f"最大长度：{data.max_length:.1f}")
+        informative = "\n".join(detail_lines)
+
+        # 3) 单实例：popup 还在就刷新文本，不再 new
+        existing = getattr(self, "_ng_popup", None)
+        if existing is not None and existing.isVisible():
+            try:
+                existing.setInformativeText(informative)
+                # 提到最前
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except Exception:
+                # popup 状态异常，重建
+                try:
+                    existing.close()
+                except Exception:
+                    pass
+
+        # 4) 新建 popup（非阻塞 show，不是 exec）
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self.window)
+            msg.setWindowTitle("NG 报警")
+            msg.setIcon(QMessageBox.Icon.Warning)
+            msg.setText(
+                "<div style='font-size:18px;font-weight:bold;color:#e74c3c'>"
+                "检测到 NG 棒</div>"
+            )
+            msg.setInformativeText(informative)
+            reset_btn = msg.addButton("复 位", QMessageBox.ButtonRole.AcceptRole)
+            msg.addButton("关 闭", QMessageBox.ButtonRole.RejectRole)
+
+            # 按钮回调通过 finished 信号处理（非阻塞）
+            def _on_finished(_code):
+                try:
+                    if msg.clickedButton() is reset_btn:
+                        self._on_reset_clicked()
+                except Exception as e:
+                    logger.warning(f"复位按钮回调异常: {e}")
+                # 清掉单例引用
+                self._ng_popup = None
+            msg.finished.connect(_on_finished)
+
+            self._ng_popup = msg
+            msg.show()    # ★ 非阻塞 ★
+        except Exception as e:
+            logger.error(f"创建 NG 弹窗失败: {e}", exc_info=True)
 
     def _on_reset_clicked(self):
         """处理复位请求 — 错误反馈走状态栏 / log，不再用 modal popup。
@@ -810,22 +977,106 @@ class SiRodCameraApp(QObject):
         popup 的 finished 信号回调里）。
         """
         logger.info("用户触发复位")
-        try:
-            ok = self.serial_manager.send_reset()
-            if ok:
-                if hasattr(self.window, "set_status_badge"):
-                    self.window.set_status_badge("已复位", "#27ae60")
-            else:
-                # 状态栏 + log 提示，不弹 modal
-                logger.warning("复位失败：串口未打开或发送失败")
-                if hasattr(self.window, "set_status_badge"):
-                    self.window.set_status_badge(
-                        "复位失败 — 检查串口", "#e74c3c")
-        except Exception as e:
-            logger.error(f"复位失败: {e}", exc_info=True)
+        # ★ Round 2 优化 ★ 串口写异步化，回调里更新 UI 状态
+        self._fire_serial_async("send_reset", on_done=self._on_reset_done)
+
+    def _on_reset_done(self, ok: bool, err: str) -> None:
+        """串口 send_reset 后台执行完，回主线程刷状态"""
+        if err:
+            logger.error(f"复位异常: {err}")
+            if hasattr(self.window, "set_status_badge"):
+                self.window.set_status_badge(f"复位异常: {err[:30]}", "#e74c3c")
+        elif ok:
+            if hasattr(self.window, "set_status_badge"):
+                self.window.set_status_badge("已复位", "#27ae60")
+        else:
+            logger.warning("复位失败：串口未打开或发送失败")
             if hasattr(self.window, "set_status_badge"):
                 self.window.set_status_badge(
-                    f"复位异常: {type(e).__name__}", "#e74c3c")
+                    "复位失败 — 检查串口", "#e74c3c")
+
+    def _on_mes_retry_tick(self) -> None:
+        """MES 重试 timer fire 后扔后台 QThreadPool 跑 flush（避免 UI 卡）"""
+        if not self.http_client.is_enabled:
+            return
+        if self.http_client.retry_queue_size() == 0:
+            return
+        from PyQt6.QtCore import QRunnable, QThreadPool
+
+        client = self.http_client
+
+        class _RetryTask(QRunnable):
+            def run(self):
+                try:
+                    client.flush_retries(max_per_run=10)
+                except Exception as e:
+                    logger.error(f"MES 重试 flush 异常: {e}", exc_info=True)
+
+        t = _RetryTask()
+        t.setAutoDelete(True)
+        QThreadPool.globalInstance().start(t)
+
+    def _on_ui_heartbeat_tick(self) -> None:
+        """UI 心跳每秒 tick；正常 10s log 一次，freeze 时立即报警
+
+        诊断逻辑：
+        - QTimer 在 UI 线程上 fire，UI 卡住时 tick 也卡
+        - 比对"上次 tick 时间" → 当前 tick 时间，如果 > 1.5s 说明被阻塞过
+        - freeze 时立即打 WARNING（带阻塞时长），方便事后查 log 定位
+        - 正常情况下每 10s 打一次 INFO，降低 log 量
+        """
+        now = time.time()
+        gap = now - self._last_hb_tick_t
+        self._last_hb_tick_t = now
+        if gap > 1.5:
+            # UI 主线程刚才被阻塞了，立即记录
+            logger.warning(
+                f"[UI_HB] {now:.1f} ⚠ 主线程上次 tick 距今 {gap:.1f}s（>1.5s 视为卡顿）"
+            )
+            self._last_hb_log_t = now
+            return
+        if now - self._last_hb_log_t >= 10.0:
+            logger.info(f"[UI_HB] {now:.1f}")
+            self._last_hb_log_t = now
+
+    def _fire_serial_async(self, method_name: str, on_done=None) -> None:
+        """通用：把 serial_manager.send_ng / send_reset 等扔后台执行。
+
+        Parameters
+        ----------
+        method_name : "send_ng" / "send_reset" / "send_raw" 等
+        on_done : Optional[Callable[[bool, str], None]]
+            可选回调：在 UI 线程接收 (ok: bool, err_str: str)。
+            None = fire-and-forget。
+        """
+        from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+
+        class _Sig(QObject):
+            done = pyqtSignal(bool, str)
+
+        sm = self.serial_manager
+
+        class _Task(QRunnable):
+            def __init__(self_):
+                super().__init__()
+                self_.signals = _Sig()
+
+            def run(self_):
+                try:
+                    fn = getattr(sm, method_name)
+                    result = fn()
+                    ok = bool(result) if result is not None else True
+                    self_.signals.done.emit(ok, "")
+                except Exception as e:
+                    logger.error(
+                        f"串口异步 {method_name} 异常: {e}", exc_info=True)
+                    self_.signals.done.emit(False, f"{type(e).__name__}: {e}")
+
+        task = _Task()
+        if on_done is not None:
+            task.signals.done.connect(on_done)
+        task.setAutoDelete(True)
+        QThreadPool.globalInstance().start(task)
 
     def _on_serial_settings_changed(self):
         logger.info("串口设置已更改，重新打开串口...")
@@ -875,6 +1126,24 @@ class SiRodCameraApp(QObject):
             logger.info(f"判定参数已热更新生效（{len(new_rules)} 类 + 全局阈值）")
         except Exception as e:
             logger.error(f"判定参数热更新失败，请重启程序: {e}", exc_info=True)
+
+    def _on_camera_params_saved(self, params: dict):
+        """相机参数 UI 已保存（已热更新到硬件 + 已写 config.json）。
+        这里只做轻量收尾：log + 状态徽章刷新。具体写硬件 / 写 config 都由 CameraPage 内部完成。"""
+        try:
+            editable_keys = ("width", "height", "acquisition_mode",
+                             "acquisition_frame_count", "trigger_mode",
+                             "trigger_source", "exposure_us",
+                             "multiframe_first_wait_s", "grab_timeout_ms")
+            summary = ", ".join(
+                f"{k}={params.get(k)}" for k in editable_keys
+                if k in params
+            )
+            logger.info(f"相机参数已保存并热更新: {summary}")
+            if hasattr(self.window, "set_status_badge"):
+                self.window.set_status_badge("相机参数已更新", "#00d4ff")
+        except Exception as e:
+            logger.error(f"相机参数保存回调异常: {e}", exc_info=True)
 
     def _on_mes_status_updated(self, success: bool, rod_id: str, message: str):
         try:
@@ -949,11 +1218,17 @@ class SiRodCameraApp(QObject):
         self.window.set_device_status("TCP", engine_running)
         self.window.set_device_status("Run.bat", engine_looping)
         self.window.update_recv_count(self.engine.inspect_count)
+        # 相机灯：engine 健康标志（open/grab 成功为绿，掉电掉线 grab 失败转红）
+        self.window.set_device_status("相机", self.engine.is_camera_ok)
         self.window.set_device_status("数据库", self.database.is_connected)
         self.window.set_device_status("报警灯", self.serial_manager.is_open)
         scanner_ok = (self.scanner is not None
                        and self.scanner.is_connected)
-        self.window.set_device_status("飞书", scanner_ok)
+        # ★ Round 9 ★ 之前误贴在"飞书"灯，命名误导。现在用专门的"扫码枪"灯
+        self.window.set_device_status("扫码枪", scanner_ok)
+        # 飞书状态 = config 启用 (我们不本地推飞书，只是状态显示)
+        feishu_enabled = self.feishu.is_enabled if self.feishu else False
+        self.window.set_device_status("飞书", feishu_enabled)
 
         now = time.time()
         current_count = self.engine.inspect_count
@@ -988,6 +1263,94 @@ class SiRodCameraApp(QObject):
         else:
             self.window.set_status_badge("运行中", "#27ae60")
             self._wd_warned_scanner = False
+
+        # ★ Round 8 ★ 进程级 watchdog — 检测 worker / scanner 线程 hang
+        # 阈值：worker 5 分钟无 iter tick = hang；scanner 3 分钟无 heartbeat = hang
+        self._check_thread_hangs(now)
+
+    def _check_thread_hangs(self, now: float) -> None:
+        """检测 worker / scanner 后台线程是否 hang，hang 时 CRITICAL log。
+
+        阈值偏宽（5min / 3min）是为了避开偶发慢 grab + 编码器停转等正常情况。
+        只 log，不 auto-restart —— 工业系统让人决定再操作，避免 cascading failure。
+        """
+        WORKER_HANG_THRESHOLD_S = 5 * 60   # worker iter 5 分钟没动 = hang
+        SCANNER_HANG_THRESHOLD_S = 3 * 60  # scanner heartbeat 3 分钟没出 = hang
+        WARN_REPEAT_INTERVAL_S = 5 * 60    # 同一警告 5 分钟不重复 log（避免刷屏）
+
+        # worker hang 检测
+        try:
+            last_tick = getattr(self.engine, "_last_loop_tick_t", 0.0)
+            if last_tick > 0 and self.engine.is_looping:
+                gap = now - last_tick
+                if gap > WORKER_HANG_THRESHOLD_S:
+                    last_warn = getattr(self, "_wd_last_worker_warn_t", 0.0)
+                    if now - last_warn > WARN_REPEAT_INTERVAL_S:
+                        logger.critical(
+                            f"[watchdog] 检测引擎 worker 可能 hang："
+                            f"已 {int(gap)}s 未 iter（阈值 {WORKER_HANG_THRESHOLD_S}s）。"
+                            f"可能在 BVCAM SDK 中卡死，建议重启程序。"
+                        )
+                        self._wd_last_worker_warn_t = now
+        except Exception as e:
+            logger.debug(f"_check_thread_hangs worker 检测异常: {e}")
+
+        # scanner hang 检测
+        try:
+            if self.scanner is not None and self.scanner.is_running:
+                last_hb = getattr(self.scanner, "_last_heartbeat_t", 0.0)
+                if last_hb > 0:
+                    # 注意：scanner 用 time.monotonic()，不是 time.time()
+                    import time as _t
+                    gap = _t.monotonic() - last_hb
+                    if gap > SCANNER_HANG_THRESHOLD_S:
+                        last_warn = getattr(self, "_wd_last_scanner_warn_t", 0.0)
+                        if now - last_warn > WARN_REPEAT_INTERVAL_S:
+                            logger.critical(
+                                f"[watchdog] 扫码枪 worker 可能 hang："
+                                f"已 {int(gap)}s 无心跳（阈值 {SCANNER_HANG_THRESHOLD_S}s）。"
+                            )
+                            self._wd_last_scanner_warn_t = now
+        except Exception as e:
+            logger.debug(f"_check_thread_hangs scanner 检测异常: {e}")
+
+    def _ui_watchdog_loop(self) -> None:
+        """OS 线程级 UI hang 检测器 —— 独立于 Qt 事件循环。
+
+        Round 8 加的 _check_thread_hangs 由 QTimer 驱动，跑在 UI 线程上。
+        UI 线程一旦 hang，所有 QTimer 都停摆，那个 watchdog 自己也失效。
+
+        这里在 __init__ 末尾起一个 daemon threading.Thread，每 5s 醒一次：
+          - 读 self._last_hb_tick_t（UI 心跳 Qt timer 最后一次 fire 的时间）
+          - 当前 wall clock - last_tick > 10s 就视为 UI 卡死
+          - CRITICAL log（logger 是 thread-safe 的，可以从任何线程写）
+          - 5min 内不重复刷屏
+
+        注意：进程退出时不显式 join —— daemon 线程会随主进程一起结束。
+        """
+        UI_HANG_THRESHOLD_S = 10.0
+        WARN_REPEAT_INTERVAL_S = 5 * 60.0
+        CHECK_INTERVAL_S = 5.0
+        last_warn_t = 0.0
+        while not self._ui_watchdog_stop:
+            try:
+                time.sleep(CHECK_INTERVAL_S)
+                now = time.time()
+                last_tick = self._last_hb_tick_t
+                gap = now - last_tick
+                if gap > UI_HANG_THRESHOLD_S:
+                    if now - last_warn_t > WARN_REPEAT_INTERVAL_S:
+                        logger.critical(
+                            f"[ui-watchdog] UI 主线程可能 hang："
+                            f"心跳 tick 距今 {gap:.1f}s（阈值 {UI_HANG_THRESHOLD_S}s）。"
+                            f"如持续超过 60s，建议直接 kill 进程让 vbs supervisor 重启。"
+                        )
+                        last_warn_t = now
+            except Exception as e:
+                try:
+                    logger.debug(f"ui-watchdog 异常: {e}")
+                except Exception:
+                    pass
 
 
 def _global_exception_handler(exc_type, exc_value, exc_tb):
@@ -1078,21 +1441,87 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLE)
 
+    # ★ Round 7 ★ 把 QThreadPool 最大并发数从默认 (CPU 核数, 通常 4-8)
+    # 提到 16。后台任务多（每根棒触发 1 个 BG task, MES 重试, async serial,
+    # camera read/apply, DB query, MES retry, ...），burst 时不至于排队。
+    try:
+        from PyQt6.QtCore import QThreadPool as _QTP
+        _QTP.globalInstance().setMaxThreadCount(16)
+        logger.info(
+            f"QThreadPool max threads = "
+            f"{_QTP.globalInstance().maxThreadCount()}"
+        )
+    except Exception as e:
+        logger.warning(f"设置 QThreadPool 容量失败: {e}")
+
+    # ★ Round 7 ★ 启动 splash screen — UI 起来前给操作员看的反馈
+    # init 耗时 5-10s (相机 + AI 模型 + DB)，无 splash 时 vbs 启动后用户
+    # 啥都看不到，体验差。
+    splash = None
+    try:
+        from PyQt6.QtWidgets import QSplashScreen
+        from PyQt6.QtGui import QPixmap as _QPx
+        from PyQt6.QtCore import Qt as _Qt
+        splash_pix = _QPx(500, 200)
+        splash_pix.fill(_Qt.GlobalColor.darkBlue)
+        splash = QSplashScreen(splash_pix,
+                                _Qt.WindowType.WindowStaysOnTopHint)
+        splash.showMessage(
+            "SiRod Inspector\n\n正在启动 (相机 + AI 模型加载)...",
+            _Qt.AlignmentFlag.AlignCenter,
+            _Qt.GlobalColor.white,
+        )
+        splash.show()
+        app.processEvents()
+    except Exception as e:
+        logger.warning(f"splash screen 创建失败（忽略）: {e}")
+        splash = None
+
     try:
         controller = SiRodCameraApp()
         controller.start()
     except Exception as e:
+        if splash is not None:
+            try: splash.close()
+            except Exception: pass
         logger.critical(f"应用启动失败: {e}", exc_info=True)
         QMessageBox.critical(None, "启动失败", f"应用启动失败:\n{e}")
         sys.exit(1)
 
+    # splash → 关掉，把 focus 转给主窗口
+    if splash is not None:
+        try:
+            splash.finish(controller.window)
+        except Exception:
+            pass
+
+    # ────── 关闭兜底 watchdog ──────
+    # 问题背景：controller.stop() 走到 engine._cleanup_partial() → BVCamera.close()
+    # → BVCAM_Close C SDK 调用，偶发在内部等 pending callback 卡死，Python 控制不了，
+    # 表现就是关窗后 PowerShell 终端永不退。
+    # 解法：aboutToQuit 触发时，起一个 daemon 线程，hard_exit_after_s 秒后无条件
+    # os._exit(0)。正常关闭快（<5s），watchdog 不会触发；卡死时强制吐出进程。
+    def _kick_watchdog(hard_exit_after_s: float = 15.0) -> None:
+        def _force_exit():
+            time.sleep(hard_exit_after_s)
+            logger.warning(
+                f"[watchdog] stop() 超过 {hard_exit_after_s}s 未完成 → "
+                f"os._exit(0) 强制退出"
+            )
+            os._exit(0)   # 注意是 _exit (下划线)，不是 exit；后者不存在于 os
+        threading.Thread(target=_force_exit, daemon=True,
+                         name="ShutdownWatchdog").start()
+
+    app.aboutToQuit.connect(_kick_watchdog)
     app.aboutToQuit.connect(controller.stop)
     logger.info("进入事件循环")
     try:
-        return app.exec()
+        rc = app.exec()
     finally:
         # 显式持引用到 main 结束 — 避免 lock_fh 被 GC 提前释放
         del _lock_fh
+    # 正常路径（stop 顺利返回）→ 主动 os._exit 兜底，防止某些 lingering 线程拖着
+    os._exit(rc)
 
 
 if __name__ == "__main__":

@@ -95,7 +95,14 @@ def setup_logging(
     root_logger.addHandler(err_handler)
 
     # ── 3. 控制台输出 ──
-    if console:
+    if console and sys.stdout is not None:
+        # Windows 控制台默认 GBK，日志里的非 GBK 字符（⚠ 等）会让 emit 抛
+        # UnicodeEncodeError 刷一堆 "--- Logging error ---"。把 stdout 降级成
+        # errors='replace'：编不出的字符显示成 '?'，不影响 UTF-8 文件日志。
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(getattr(logging, level, logging.INFO))
         console_handler.setFormatter(formatter)

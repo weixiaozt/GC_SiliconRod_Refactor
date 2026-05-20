@@ -36,6 +36,9 @@ from __future__ import annotations
 import ctypes as C
 import logging
 import os
+import queue
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -230,6 +233,59 @@ class _BVCAM_IMAGE(C.Structure):
     ]
 
 
+# ──────────────────────────────────────────────
+# IMAGEFUNC ctypes 类型 + 模块级 image queue
+# ──────────────────────────────────────────────
+# C 头：VOID CALLBACK(HCAMERA, BVCAM_IMAGE*, BVCAM_IMAGEDATAINFO*, PVOID)
+# Windows CALLBACK = __stdcall → WINFUNCTYPE
+IMAGEFUNC = C.WINFUNCTYPE(
+    None,
+    C.c_void_p,                 # HCAMERA
+    C.POINTER(_BVCAM_IMAGE),    # image
+    C.c_void_p,                 # info（忽略）
+    C.c_void_p,                 # context
+)
+
+# 模块级 queue + lock，避免 bound method ctypes 包装复杂性
+# callback 极简：只把已 copy 的 bytes + shape 信息入队；主线程后处理 numpy
+_image_queue: queue.Queue = queue.Queue()
+_callback_call_count = 0
+_callback_lock = threading.Lock()
+
+
+def _module_image_callback(h_camera, image_ptr, info_ptr, context):
+    """SDK 内部线程在每帧到达时调用。
+
+    极简：只拷贝 raw bytes + 入队 (raw_bytes, width, height, pixel_format_id, length)
+    主线程 trigger_and_grab 从 queue 拿到后再做 numpy reshape / dtype 解析。
+    """
+    global _callback_call_count
+    try:
+        with _callback_lock:
+            _callback_call_count += 1
+        if not image_ptr:
+            return
+        img = image_ptr.contents
+        w = int(img.Width)
+        h = int(img.Height)
+        length = int(img.Length)
+        pf_id = int(img.PixelFormatID)
+        if not img.pBuffer or length == 0:
+            return
+        # 拷贝原始字节（最小操作，不做 reshape）
+        # 用 ctypes.string_at 拷贝指定地址 length 字节，返回 Python bytes
+        addr = C.cast(img.pBuffer, C.c_void_p).value
+        raw = C.string_at(addr, length)
+        _image_queue.put((raw, w, h, pf_id, length))
+    except Exception:
+        # 不能让异常传出 C 回调
+        pass
+
+
+# 必须保留 callback 对象引用（避免 GC）
+_image_cb_ref = IMAGEFUNC(_module_image_callback)
+
+
 # ============================================================
 # 函数签名绑定
 # ============================================================
@@ -264,6 +320,13 @@ def _bind_signatures(dll: C.CDLL) -> None:
 
     dll.BVCAM_ImageStop.argtypes = [C.c_void_p]
     dll.BVCAM_ImageStop.restype = C.c_int
+
+    # Callback 模式（BV Viewer 实测就用这个 — sync ImageReq/Complete 不工作）
+    # 签名：BOOL BVCAM_SetImageCallBack(HCAMERA, PVOID, IMAGEFUNC, DWORD BufferCount, BOOL)
+    dll.BVCAM_SetImageCallBack.argtypes = [
+        C.c_void_p, C.c_void_p, IMAGEFUNC, C.c_uint32, C.c_int,
+    ]
+    dll.BVCAM_SetImageCallBack.restype = C.c_int
 
     dll.BVCAM_ImageAlloc.argtypes = [C.c_void_p, C.POINTER(C.POINTER(_BVCAM_IMAGE))]
     dll.BVCAM_ImageAlloc.restype = C.c_int
@@ -516,19 +579,25 @@ class BVCamera:
             )
 
         # 读相机信息
+        self.model = "?"
+        self.serial = "?"
+        self.vendor = "?"
+        self.ip_addr = ""
+        self.mac_addr = ""
         cinfo = _BVCAM_DEVINFO()
         if self._dll.BVCAM_CameraInfo(self._h_camera, C.byref(cinfo)):
             if cinfo.DeviceType == BVCAM_GIGECAMERA:
                 g = cinfo.u.GigEDev
                 self.model = g.ModelName.decode("ascii", "replace")
                 self.serial = g.SerialNumber.decode("ascii", "replace")
+                self.vendor = g.VendorName.decode("ascii", "replace")
+                self.ip_addr = ".".join(str(b) for b in g.IPAddr)
+                self.mac_addr = ":".join(f"{b:02X}" for b in g.MACAddr)
             else:
                 u = cinfo.u.UsbDev
                 self.model = u.ModelName.decode("ascii", "replace")
                 self.serial = u.SerialNumber.decode("ascii", "replace")
-        else:
-            self.model = "?"
-            self.serial = "?"
+                self.vendor = u.VendorName.decode("ascii", "replace")
 
         logger.info(f"相机已打开: {self.model} sn={self.serial}")
 
@@ -678,19 +747,25 @@ class BVCamera:
                   width: Optional[int] = None,
                   height: Optional[int] = None,
                   acquisition_mode: str = "SingleFrame",
+                  acquisition_frame_count: Optional[int] = None,
                   trigger_mode: str = "On",
                   trigger_source: str = "Software",
                   exposure_us: Optional[float] = None) -> None:
         """一次性配置常用参数。``None`` 字段不动。
 
-        默认设置为「单帧 + 软触发」模式，与 Halcon 端 Run.bat 一致。
-
         Parameters
         ----------
         width, height : int
-            图像尺寸。BV-3110-GIGE 线扫相机典型: 1024 × 15000。
+            图像尺寸。
+            - SingleFrame 1024×15000：一次扫整张大图
+            - MultiFrame  1024×100 + frame_count=150：扫 150 张小帧，外部拼回 15000 行
+              （编码器同步对短帧更宽容，盐城现场用这种）
         acquisition_mode : str
             "SingleFrame" / "MultiFrame" / "Continuous"
+        acquisition_frame_count : int | None
+            ``MultiFrame`` 模式下相机一次触发要吐多少帧。``None`` / 不传则不动该字段。
+            注意：调用方还要在 ``trigger_and_grab(frame_count=N)`` 里传相同的 N，
+            才能完整收齐 N 帧拼图。
         trigger_mode : str
             "On" / "Off"
         trigger_source : str
@@ -704,10 +779,43 @@ class BVCamera:
         except BVCameraError as e:
             logger.warning(f"AcquisitionMode 设置失败（可能相机不支持）: {e}")
 
+        # MultiFrame 模式下设置一次触发的帧数
+        if acquisition_frame_count is not None:
+            try:
+                self.set_int("AcquisitionFrameCount", int(acquisition_frame_count))
+            except BVCameraError as e:
+                logger.warning(
+                    f"AcquisitionFrameCount={acquisition_frame_count} 设置失败"
+                    f"（相机可能不支持该 feature 或当前 mode 下不可写）: {e}"
+                )
+
         if width is not None:
             self.set_int("Width", int(width))
         if height is not None:
             self.set_int("Height", int(height))
+
+        # ★ 关键：先 set TriggerSelector 再 set TriggerMode/Source ★
+        #
+        # GenICam SFNC 规范：TriggerSelector 决定 TriggerMode/Source/Software
+        # 作用在"哪种 trigger 事件"上。常见值：
+        #   AcquisitionStart — 整个采集的开始（最通用，所有 mode 都能用）
+        #   FrameStart       — 每一帧的开始（不是所有相机都支持）
+        #   FrameBurstStart  — 一组帧的开始
+        #
+        # 实测 BV-C3110GE 不同 firmware 支持的 TriggerSelector 值不一样：
+        #   sn=101067 (开发机)：支持 AcquisitionStart + FrameStart
+        #   sn=101771 (盐城)：只支持 AcquisitionStart
+        #
+        # 所以统一用 AcquisitionStart —— SingleFrame + AcquisitionStart trigger
+        # 一次触发吐 1 帧；MultiFrame + AcquisitionStart trigger 一次触发吐 N 帧。
+        # 都符合 GenICam SFNC 规范。
+        target_selector = "AcquisitionStart"
+        try:
+            self.set_enum("TriggerSelector", target_selector)
+        except BVCameraError as e:
+            logger.warning(
+                f"TriggerSelector={target_selector} 设置失败（相机可能不支持）: {e}"
+            )
 
         try:
             self.set_enum("TriggerMode", trigger_mode)
@@ -725,14 +833,62 @@ class BVCamera:
                 logger.warning(f"ExposureTime 设置失败: {e}")
 
         logger.info(
-            f"相机配置: w={width} h={height} mode={acquisition_mode} "
-            f"trigger={trigger_mode}/{trigger_source} exp={exposure_us}us"
+            f"相机配置: w={width} h={height} mode={acquisition_mode}"
+            f"{f' fc={acquisition_frame_count}' if acquisition_frame_count else ''} "
+            f"sel={target_selector} trigger={trigger_mode}/{trigger_source} "
+            f"exp={exposure_us}us"
         )
+
+    def read_all_params(self) -> dict:
+        """从相机硬件实时读所有关键参数，返回 dict。
+
+        失败的字段在 dict 里存为 ``None``（不抛异常，UI 用 ``None`` 显示 ``"<读取失败>"``）。
+        包括：设备信息（model/serial/vendor/ip/mac）+ 帧参数 + 触发参数。
+        不包含软件层参数（multiframe_first_wait_s / grab_timeout_ms）—— 那些由
+        ``InspectEngineConfig`` 持有，由调用方合并。
+        """
+        def _safe(getter, name, kind):
+            try:
+                if kind == "int":
+                    return self.get_int(name, cache_clear=True)
+                if kind == "float":
+                    return self.get_float(name, cache_clear=True)
+                if kind == "enum":
+                    return self.get_enum(name, cache_clear=True)
+                return None
+            except BVCameraError as e:
+                logger.debug(f"读 {name} 失败（可能相机不支持）: {e}")
+                return None
+
+        return {
+            # 设备只读
+            "model":           self.model,
+            "serial":          self.serial,
+            "vendor":          self.vendor,
+            "ip_addr":         self.ip_addr,
+            "mac_addr":        self.mac_addr,
+            # 帧参数
+            "width":           _safe(self.get_int,   "Width",                 "int"),
+            "height":          _safe(self.get_int,   "Height",                "int"),
+            "acquisition_mode":         _safe(self.get_enum,  "AcquisitionMode",       "enum"),
+            "acquisition_frame_count":  _safe(self.get_int,   "AcquisitionFrameCount", "int"),
+            # 触发参数
+            "trigger_selector":_safe(self.get_enum,  "TriggerSelector", "enum"),
+            "trigger_mode":    _safe(self.get_enum,  "TriggerMode",   "enum"),
+            "trigger_source":  _safe(self.get_enum,  "TriggerSource", "enum"),
+            "exposure_us":     _safe(self.get_float, "ExposureTime",  "float"),
+        }
 
     # ─────────── 流控 ───────────
 
     def start(self) -> None:
-        """分配资源 + 启动采集流。"""
+        """分配资源 + 注册 image callback + 启动采集流（callback 模式）。
+
+        BV SDK 实测同步 ImageReq+Complete 拿不到 MultiFrame burst 的图，
+        BV Viewer 用的也是 BVCAM_SetImageCallBack（strings dump 证实）。
+        我们也走 callback：相机每帧到达 → SDK 内部线程调 _module_image_callback
+        → 入队 → trigger_and_grab 主线程 queue.get。
+        """
         if self._streaming:
             return
         if not self._resources_allocated:
@@ -742,8 +898,8 @@ class BVCamera:
                 )
             self._resources_allocated = True
 
-        # 预分配 1 个 image buffer 复用（只在首次 start 时分配；后续 stop/start
-        # 循环要复用，否则每轮泄漏一个 ~30MB 缓冲，长跑 → 内核地址空间爆）
+        # 保留 ImageAlloc — 即使 callback 模式可能不用，留着不影响（向后兼容
+        # apply_camera_params 等其他代码对 _image_alloc 的引用）
         if self._image_alloc is None:
             img_pp = C.POINTER(_BVCAM_IMAGE)()
             if not self._dll.BVCAM_ImageAlloc(
@@ -753,12 +909,53 @@ class BVCamera:
                 )
             self._image_alloc = img_pp
 
+        # 注册 callback —— 必须在 ImageStart 之前。BufferCount 给 8（小但够缓冲）
+        # 用模块级 _image_cb_ref（已有引用，避免 GC）+ 模块级 _image_queue
+        global _callback_call_count, _image_queue
+        # 清空可能残留
+        while not _image_queue.empty():
+            try:
+                _image_queue.get_nowait()
+            except queue.Empty:
+                break
+        with _callback_lock:
+            _callback_call_count = 0
+
+        BUFFER_COUNT = 8
+        t0 = time.perf_counter()
+        if not self._dll.BVCAM_SetImageCallBack(
+                self._h_camera, None, _image_cb_ref,
+                C.c_uint32(BUFFER_COUNT), 0):
+            raise BVCameraError(
+                f"SetImageCallBack 失败: {_last_error_msg(self._dll)}"
+            )
+        logger.info(
+            f"SetImageCallBack 注册成功 BufferCount={BUFFER_COUNT} "
+            f"({(time.perf_counter()-t0)*1000:.0f}ms)"
+        )
+
         if not self._dll.BVCAM_ImageStart(self._h_camera):
             raise BVCameraError(
                 f"ImageStart 失败: {_last_error_msg(self._dll)}"
             )
         self._streaming = True
-        logger.info("相机采集流已启动")
+        logger.info("相机采集流已启动（callback 模式）")
+
+    def ping(self) -> bool:
+        """SDK 级探活：强制从设备读一个参数（cache_clear），读得到=相机还连着。
+
+        用途：grab 因「没棒/编码器没转」超时时，没法靠帧流判断相机是否掉线。
+        这里读一次设备寄存器——相机连着就能读到，掉线/断电则 SDK 调用失败。
+        **必须由持有 _camera_lock 的线程（worker）调用**，不要从 UI 线程调
+        （会和 20s 的 grab 抢锁卡住 UI）。读不到任何异常都吞掉返回 False。
+        """
+        if self._h_camera is None:
+            return False
+        try:
+            self.get_int("Width", cache_clear=True)
+            return True
+        except Exception:
+            return False
 
     def stop(self) -> None:
         if not self._streaming:
@@ -772,43 +969,17 @@ class BVCamera:
 
     # ─────────── 抓图 ───────────
 
-    def trigger_and_grab(self, timeout_ms: int = 5000) -> np.ndarray:
-        """发送软触发并阻塞等待一帧。
+    def _complete_one_frame(self, timeout_ms: int) -> np.ndarray:
+        """已经发了 ImageReq + Trigger，等一帧完成并拷贝返回。
 
-        返回 ``np.ndarray``，形状 ``(H, W)``，dtype 取决于像素格式
-        （Mono8→uint8, Mono10/12/14/16→uint16）。
-
-        ⚠ 数据已拷贝出底层缓冲，外部安全持有。
+        失败时已经 abort pending request。调用方负责后续 Req。
+        返回 ``(H, W)`` 的 numpy 数组（独立拷贝）。
         """
-        if not self._streaming:
-            raise BVCameraError("相机未启动采集流，先调用 start()")
-        if self._image_alloc is None:
-            raise BVCameraError("ImageAlloc 未完成")
-
-        # 1) 排队请求
-        if not self._dll.BVCAM_ImageReq(self._h_camera, self._image_alloc):
-            raise BVCameraError(
-                f"ImageReq 失败: {_last_error_msg(self._dll)}"
-            )
-
-        # 2) 软触发 — 失败要 abort pending request，否则下次 ImageReq 会拿到
-        #    上次的 stale frame 或者直接挂
-        try:
-            self.execute("TriggerSoftware")
-        except BVCameraError:
-            try:
-                self._dll.BVCAM_ImageReqAbortAll(self._h_camera)
-            except Exception:
-                pass
-            raise
-
-        # 3) 等待完成（timeout_ms=-1 表示无限等）
         rtn = self._dll.BVCAM_ImageComplete(
             self._h_camera, self._image_alloc, C.c_uint32(timeout_ms), None,
         )
         if not rtn:
             status = self._image_alloc.contents.Status
-            # 失败路径：底层 buffer 仍处于 pending，必须 abort 否则下次 ImageReq 会失败
             try:
                 self._dll.BVCAM_ImageReqAbortAll(self._h_camera)
             except Exception:
@@ -826,9 +997,8 @@ class BVCamera:
 
         name, dtype, bpp = _decode_pixel_format(pf_id, length, w, h)
 
-        # 4) 拷贝缓冲到 numpy
+        # 拷贝缓冲到 numpy（必须 copy，DLL 下次 ImageReq 复用底层缓冲）
         # 用 from_address + frombuffer + copy 替代 string_at —— 实测快 ~2x
-        # （string_at 会先构造 Python bytes 中转，多一次拷贝）
         addr = C.addressof(img.pBuffer.contents)
         c_buf = (C.c_uint8 * length).from_address(addr)
         arr = np.frombuffer(c_buf, dtype=dtype).copy()
@@ -843,13 +1013,111 @@ class BVCamera:
                 f"expected={h*w*bpp} (h={h} w={w} bpp={bpp})"
             )
             arr = arr.reshape(-1)
-        # 此时 arr 已经是独立拷贝，DLL 下次 ImageReq 复用底层缓冲不会污染它
 
         logger.debug(
-            f"抓图成功: w={w} h={h} length={length} pf={name}({pf_id:#x}) "
+            f"单帧抓图: w={w} h={h} length={length} pf={name}({pf_id:#x}) "
             f"dtype={dtype.__name__}"
         )
         return arr
+
+    def trigger_and_grab(self, timeout_ms: int = 5000,
+                         frame_count: Optional[int] = None,
+                         first_frame_wait_s: float = 0.0) -> np.ndarray:
+        """发送软触发并阻塞拿帧。
+
+        Parameters
+        ----------
+        timeout_ms : int
+            单帧 ImageComplete 的超时（每帧独立计时）
+        frame_count : int | None
+            ``None`` 或 ``1``：SingleFrame 模式，触发一次拿一帧 ``(H, W)``。
+            ``N > 1``：MultiFrame 模式 —— 触发后相机会连续吐 N 帧，本方法逐帧
+            收齐后做 vertical concat，返回 ``(N*H, W)``。要求外部 ``configure()``
+            时已经设了 ``acquisition_mode="MultiFrame"`` 和 ``acquisition_frame_count=N``。
+        first_frame_wait_s : float
+            仅 MultiFrame 模式生效：拿到第一帧后睡眠几秒再开始收后续帧，
+            让编码器同步状态稳定。**对齐 Halcon Run.hdev:7184 wait_seconds(5)** ——
+            原作者多年验证过的习惯，第一帧通常在编码器刚启动状态下不稳，
+            等几秒让相机持续吐帧到 SDK 内部 buffer 队列里再消费，后续帧就稳。
+            默认 ``0`` 不等待。
+
+        返回
+        ----
+        np.ndarray
+            形状 ``(H, W)`` 或 ``(N*H, W)``，dtype 取决于像素格式
+            （Mono8→uint8, Mono10/12/14/16→uint16）。已 copy，外部安全持有。
+        """
+        if not self._streaming:
+            raise BVCameraError("相机未启动采集流，先调用 start()")
+        if self._image_alloc is None:
+            raise BVCameraError("ImageAlloc 未完成")
+
+        n = max(1, int(frame_count or 1))
+
+        # 清空可能残留的帧（避免上次 trigger 的 stale 帧）
+        global _image_queue, _callback_call_count
+        before_n = _callback_call_count
+        while not _image_queue.empty():
+            try:
+                _image_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # 软触发整组 — 相机会通过编码器同步吐 N 帧，每帧 callback 入队
+        t_trig = time.perf_counter()
+        try:
+            self.execute("TriggerSoftware")
+        except BVCameraError:
+            raise
+        logger.debug(
+            f"TriggerSoftware 发送 ({(time.perf_counter()-t_trig)*1000:.1f}ms)"
+        )
+
+        # 从 queue 收 N 帧（callback 在 SDK 内部线程入队）
+        timeout_s = timeout_ms / 1000.0
+        frames = []
+        t_start = time.perf_counter()
+        for i in range(n):
+            try:
+                raw, w, h, pf_id, length = _image_queue.get(timeout=timeout_s)
+            except queue.Empty:
+                with _callback_lock:
+                    got = _callback_call_count - before_n
+                raise BVCameraError(
+                    f"queue.get 超时 ({timeout_ms}ms, 第 {i+1}/{n} 帧, "
+                    f"callback 被调 {got} 次) — 编码器没转 / 相机没吐图 / "
+                    f"callback 未注册成功"
+                )
+
+            # 解析 raw bytes 成 numpy 数组
+            _, dtype, _ = _decode_pixel_format(pf_id, length, w, h)
+            arr = np.frombuffer(raw, dtype=dtype)
+            if arr.size == h * w:
+                arr = arr.reshape(h, w)
+            elif arr.size >= h * w:
+                arr = arr[: h * w].reshape(h, w)
+            else:
+                logger.warning(
+                    f"图像 buffer 不足: len={length} expected={h*w*dtype().itemsize}"
+                )
+            frames.append(arr)
+
+            # 多帧模式首帧后强制等待（对齐 Halcon BV_GrapImage:7184）
+            if i == 0 and n > 1 and first_frame_wait_s > 0:
+                logger.debug(
+                    f"MultiFrame 首帧后等待 {first_frame_wait_s}s"
+                )
+                time.sleep(first_frame_wait_s)
+
+        if n == 1:
+            return frames[0]
+
+        stitched = np.vstack(frames)
+        logger.debug(
+            f"多帧拼接: {n} 帧 × {frames[0].shape} → {stitched.shape} "
+            f"耗时 {(time.perf_counter()-t_start)*1000:.0f}ms"
+        )
+        return stitched
 
     # ─────────── 信息查询 ───────────
 

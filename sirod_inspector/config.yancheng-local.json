@@ -1,0 +1,159 @@
+{
+    "_comment": "★ 盐城本地克隆 config ★ — 100% 复刻现场参数，仅 2 处改本地：scanner.host → 127.0.0.1（指 mock 海康），serial.enabled → false（开发机一般无 COM3）。用法：copy 到 config.json + 另起 tests/mock_hikvision_scanner.py。",
+    "tcp": {
+        "host": "127.0.0.1",
+        "port": 3000
+    },
+    "scanner": {
+        "_comment": "★ 改 127.0.0.1（原现场 192.168.12.56）→ 走本地 mock 海康。其他参数全跟现场一致",
+        "enabled": true,
+        "host": "127.0.0.1",
+        "port": 5000,
+        "poll_interval_s": 5.0,
+        "recv_timeout_s": 1.0,
+        "reconnect_interval_s": 3.0
+    },
+    "camera": {
+        "_comment": "现场原参数：MultiFrame 100×150 帧 = 15000 行拼图。multiframe_first_wait_s=5 对齐 Halcon",
+        "width": 1024,
+        "height": 100,
+        "acquisition_mode": "MultiFrame",
+        "acquisition_frame_count": 150,
+        "multiframe_first_wait_s": 5.0,
+        "exposure_us": 100.0,
+        "trigger_source": "Software",
+        "grab_timeout_ms": 20000,
+        "loop_interval_s": 2.0
+    },
+    "database": {
+        "_comment": "现场原参数。开发机如果没装 MySQL，启动只 log 警告不阻塞主流程",
+        "host": "127.0.0.1",
+        "port": 3306,
+        "user": "root",
+        "password": "改成现场密码",
+        "database": "b_xmartsql",
+        "table": "squarstickresult_v2"
+    },
+    "feishu": {
+        "enabled": false,
+        "app_id": "",
+        "app_secret": "",
+        "table_id": "",
+        "base_url": "https://open.feishu.cn/open-apis"
+    },
+    "image_store": {
+        "_comment": "现场原参数。开发机会在 D:/SiRod_v2/ 下建图目录",
+        "enabled": true,
+        "base_dir": "D:/SiRod_v2/images",
+        "raw_tif_dir": "D:/SiRod_v2/ImageRaw",
+        "web_image_dir": "D:/SiRod_v2/WebImage",
+        "web_url_base": "http://10.32.50.220:8080/v2"
+    },
+    "shift": {
+        "reset_times": [
+            "08:00",
+            "20:00"
+        ]
+    },
+    "line_id": "PV-B02",
+    "serial": {
+        "_comment": "★ 改 enabled=false（开发机一般没 COM3）。原现场 true",
+        "enabled": false,
+        "port": "COM3",
+        "baudrate": 9600,
+        "timeout": 1,
+        "ng_signal": "A0 00 01 CC",
+        "reset_signal": "A0 00 00 CC"
+    },
+    "alarm": {
+        "enabled": true
+    },
+    "http": {
+        "enabled": false,
+        "url": "http://10.31.20.29/MesAPI/Api/WMSToMESByProcedure",
+        "timeout": 10,
+        "head": {
+            "DEST_SYSTEM": "YC01MES",
+            "INTF_ID": "QPMES201",
+            "SRC_SYSTEM": "YinLieJianCe_V2",
+            "SRC_MSGID": "",
+            "BACKUP1": "QPMES201_CryptoschisisDataEM",
+            "BACKUP2": "GRZ_V2"
+        }
+    },
+    "judge": {
+        "max_area": 10.0,
+        "sum_area": 10.0,
+        "max_count": 10,
+        "max_length": 2.0,
+        "per_class": [
+            {
+                "name": "隐裂",
+                "report_ng": true,
+                "max_area": 10.0,
+                "max_length": 2.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "崩边",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "其他",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "脏污",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "线痕",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "拼缝",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "OK",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "缺口",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            }
+        ],
+        "ng_trigger_classes": [
+            "隐裂"
+        ]
+    }
+}

@@ -122,11 +122,44 @@ class StatsPage(QWidget):
         return frame, val_lbl
 
     def refresh(self):
+        """★ 异步 ★ — DB 查询和绘图都扔后台，UI 不卡。"""
         if not self._db or not self._db.is_connected:
             return
+        if getattr(self, "_refreshing", False):
+            return
+        self._refreshing = True
+
         date_from = self._date_from.date().toString("yyyy-MM-dd") + " 00:00:00"
         date_to = self._date_to.date().toString("yyyy-MM-dd") + " 23:59:59"
-        stats = self._db.get_stats(date_from, date_to)
+
+        from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+
+        class _Signals(QObject):
+            done = pyqtSignal(object)
+            error = pyqtSignal(str)
+
+        class _Task(QRunnable):
+            def __init__(self, db, dfrom, dto):
+                super().__init__()
+                self.db = db
+                self.dfrom = dfrom
+                self.dto = dto
+                self.signals = _Signals()
+            def run(self):
+                try:
+                    stats = self.db.get_stats(self.dfrom, self.dto)
+                    self.signals.done.emit(stats)
+                except Exception as e:
+                    self.signals.error.emit(f"{type(e).__name__}: {e}")
+
+        task = _Task(self._db, date_from, date_to)
+        task.signals.done.connect(self._on_refresh_done)
+        task.signals.error.connect(self._on_refresh_error)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_refresh_done(self, stats):
+        """DB 查完，回主线程刷标签 + 重绘图表"""
+        self._refreshing = False
         self._lbl_total[1].setText(str(stats["total"]))
         self._lbl_ok[1].setText(str(stats["ok"]))
         self._lbl_ng[1].setText(str(stats["ng"]))
@@ -134,6 +167,11 @@ class StatsPage(QWidget):
         if HAS_MPL:
             self._draw_pie(stats["ok"], stats["ng"])
             self._draw_bar()
+
+    def _on_refresh_error(self, err):
+        self._refreshing = False
+        import logging
+        logging.getLogger("SiRod.StatsPage").warning(f"刷新统计失败: {err}")
 
     def _draw_pie(self, ok, ng):
         self._fig_pie.clear()

@@ -426,7 +426,7 @@ class GalleryPage(QWidget):
 
     # 跨线程安全信号：从 TCP 线程传递缺陷数据到 UI 线程
     _add_defect_signal    = pyqtSignal(str, str, str, object)  # rod_id, defect_type, timestamp, image_path
-    _update_image_signal  = pyqtSignal(str, str)               # rod_id, image_path
+    _update_image_signal  = pyqtSignal(str, str, object)       # rod_id, image_path, pre_thumbnail_qimage(可为None)
 
     def __init__(self):
         super().__init__()
@@ -503,18 +503,23 @@ class GalleryPage(QWidget):
         """
         self._add_defect_signal.emit(rod_id, defect_type, timestamp, image_path)
 
-    def update_image(self, rod_id: str, image_path: str):
+    def update_image(self, rod_id: str, image_path: str, thumbnail=None):
         """
         更新指定晶棒编号的卡片图像（线程安全）。
 
-        后台线程保存图像后调用此方法，通知 UI 线程刷新对应卡片的图片显示。
+        Parameters
+        ----------
+        thumbnail : QImage | None
+            可选预生成缩略图（208×170 左右），bg 线程构造好传过来；
+            UI 线程只 QPixmap.fromImage 即可，避免阻塞磁盘 I/O。
+            None 时退回 UI 线程读磁盘（兼容老调用方）。
         """
         if image_path:
-            self._update_image_signal.emit(rod_id, image_path)
+            self._update_image_signal.emit(rod_id, image_path, thumbnail)
 
-    @pyqtSlot(str, str)
-    def _on_update_image(self, rod_id: str, image_path: str):
-        """在 UI 线程中更新 _defect_items 中的图像路径，并刷新对应卡片"""
+    @pyqtSlot(str, str, object)
+    def _on_update_image(self, rod_id: str, image_path: str, thumbnail):
+        """UI 线程刷卡片图。优先用 bg 线程预生成的缩略图。"""
         # 更新数据列表中的路径
         for item in self._defect_items:
             if item["rod_id"] == rod_id and not item.get("image_path"):
@@ -530,12 +535,21 @@ class GalleryPage(QWidget):
             card = widget_item.widget()
             if isinstance(card, DefectCard) and card._rod_id == rod_id and not card._image_path:
                 card._image_path = image_path
-                if os.path.isfile(image_path):
+                # ★ Round 6 ★ 优先用 bg 线程预生成的 QImage（UI 不读磁盘）
+                pix = None
+                if thumbnail is not None:
+                    try:
+                        pix = QPixmap.fromImage(thumbnail)
+                    except Exception as e:
+                        logger.warning(f"预生成 thumbnail 转 QPixmap 失败: {e}")
+                # fallback：UI 线程磁盘读（旧路径，兼容）
+                if pix is None and os.path.isfile(image_path):
                     pix = QPixmap(image_path).scaled(
                         208, 170,
                         Qt.AspectRatioMode.KeepAspectRatio,
                         Qt.TransformationMode.SmoothTransformation,
                     )
+                if pix is not None:
                     card._img_label.setPixmap(pix)
                     card._img_label.setText("")
                 break
@@ -550,9 +564,22 @@ class GalleryPage(QWidget):
             "image_path": image_path,
         })
 
-        # 超出上限时裁剪（避免内存无限增长）
-        if len(self._defect_items) > 500:
-            self._defect_items = self._defect_items[:500]
+        # ★ Round 4 优化 ★ 超出上限时裁剪 (避免内存无限增长)
+        #   - 同步裁剪数据列表 + 销毁尾部 widget 卡片
+        #   - 之前只裁数据 _defect_items，widget 卡片仍累积无限增长
+        #     (每个 DefectCard 含 ~50KB QPixmap，1000 卡 = 50MB+)
+        _MAX_GALLERY_ITEMS = 500
+        if len(self._defect_items) > _MAX_GALLERY_ITEMS:
+            self._defect_items = self._defect_items[:_MAX_GALLERY_ITEMS]
+        # 同步销毁超出上限的 widget 卡片（从尾部删）
+        flow_layout = self._flow_widget.layout()
+        while flow_layout.count() > _MAX_GALLERY_ITEMS:
+            tail_item = flow_layout.takeAt(flow_layout.count() - 1)
+            if tail_item is not None:
+                w = tail_item.widget()
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
 
         type_filter = self._type_combo.currentText()
         if type_filter != "全部" and defect_type != type_filter:
@@ -642,15 +669,12 @@ class GalleryPage(QWidget):
             )
             new_layout.addWidget(card)
 
-        # 替换旧的 flow widget
-        old_widget = self._flow_widget
+        # 替换旧的 flow widget。
+        # QScrollArea.setWidget() 会自动销毁它原先持有的旧 widget，
+        # 所以这里不要再手动 deleteLater()——否则是对已删对象重复 delete，
+        # 触发 "wrapped C/C++ object of type QWidget has been deleted" RuntimeError。
         self._flow_widget = new_widget
         self._scroll.setWidget(new_widget)
-
-        # 旧 widget 安全销毁（setWidget 会自动 take ownership，
-        # 但旧 widget 需要手动销毁）
-        if old_widget is not None:
-            old_widget.deleteLater()
 
         # 强制更新布局
         new_widget.adjustSize()

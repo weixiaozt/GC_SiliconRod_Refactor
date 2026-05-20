@@ -194,6 +194,10 @@ class SiRodApp(QObject):
     # ─────────── 启动 ───────────
     def start(self):
         """启动所有服务并显示窗口"""
+        # Halcon 模式没有 Python 相机/扫码枪，隐藏这两个灯（避免常红误导）
+        self.window.set_status_visible("相机", False)
+        self.window.set_status_visible("扫码枪", False)
+
         # 数据库
         try:
             if self.database.connect():

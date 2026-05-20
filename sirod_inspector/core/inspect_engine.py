@@ -80,6 +80,7 @@ def detection_to_inspect_data(
     rod_id: str = "",
     inspect_id: int = 0,
     raw_frame: Optional[np.ndarray] = None,
+    pixels_per_mm: float = 0.0,
 ) -> InspectData:
     """把 algorithm 层的 DetectionResult 装配为 UI 层期望的 InspectData。
 
@@ -109,6 +110,14 @@ def detection_to_inspect_data(
     timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
     image = raw_frame if raw_frame is not None else result.processed_image
 
+    # 显示/上报层 mm 换算（内部仍存像素口径）。长度按「直径」= 2×outer_radius / ppm。
+    from sirod_inspector.algorithm.units import (
+        radius_px_to_length_mm, area_px_to_mm2,
+    )
+    max_length_mm = radius_px_to_length_mm(result.max_length, pixels_per_mm)
+    max_area_mm2 = area_px_to_mm2(result.max_area, pixels_per_mm)
+    total_area_mm2 = area_px_to_mm2(result.sum_area, pixels_per_mm)
+
     return InspectData(
         rod_id=rod_id,
         result=result.result,
@@ -118,6 +127,9 @@ def detection_to_inspect_data(
         max_area=float(result.max_area),
         total_area=float(result.sum_area),
         max_length=float(result.max_length),
+        max_length_mm=float(max_length_mm),
+        max_area_mm2=float(max_area_mm2),
+        total_area_mm2=float(total_area_mm2),
         inspect_id=inspect_id,
         quality=int(result.quality),
         ct=float(result.ct_ms) / 1000.0,
@@ -150,10 +162,18 @@ class InspectEngineConfig:
     # 相机
     camera_uid: int = 0                     # 0 = 第一台
     width: int = 1024
-    height: int = 15000
+    height: int = 15000                     # SingleFrame 整张高；MultiFrame 单帧高
     exposure_us: Optional[float] = None     # None = 沿用相机当前值
     trigger_source: str = "Software"
-    grab_timeout_ms: int = 10000
+    grab_timeout_ms: int = 10000            # 单帧 ImageComplete 超时
+    # MultiFrame 模式：相机一次软触发吐 N 帧，每帧 height 行，外部拼成 (N*height, width)。
+    # 编码器同步对短帧（如 100 行）更宽容，盐城现场用 height=100 + frame_count=150 → 15000 行。
+    # None / 1 → SingleFrame 单帧模式（默认）。
+    acquisition_mode: str = "SingleFrame"
+    acquisition_frame_count: Optional[int] = None
+    # 多帧模式首帧后强制等待秒数（对齐 Halcon Run.hdev:7184 wait_seconds(5)）：
+    # 拿到第 1 帧后睡眠 N 秒让编码器同步稳定，再继续收后续帧。0 = 不等。
+    multiframe_first_wait_s: float = 0.0
 
     # 模型
     seg_model: str = "models/Model_seg.m"
@@ -166,6 +186,10 @@ class InspectEngineConfig:
     """新 API：每类独立 5 字段判定规则。``None`` 时由
        ``ng_trigger_classes`` 兼容构造（默认仅"隐裂"算 NG）。
        配置入口：``config.json`` 的 ``judge.per_class`` list[dict]。"""
+
+    # 显示/上报比例尺：每毫米对应多少像素（现场标定）。仅用于 mm 换算，不影响判定。
+    # <=0 视为未标定 → mm 字段统一为 0。
+    pixels_per_mm: float = 0.0
 
     # 行为
     use_preprocessed_as_inspect_image: bool = True
@@ -238,7 +262,19 @@ class InspectEngine:
         self._pipeline: Optional[Pipeline] = None
         self._inspect_id_counter = 0
         self._counter_lock = threading.Lock()
+        # ★ Round 8 ★ worker loop 心跳：每 iter 开始/结束都更新这个时间戳。
+        # 外部 watchdog (main_camera._update_status) 检查它，长时间不变 = worker hang
+        self._last_loop_tick_t: float = 0.0
+        self._loop_iter_count: int = 0
+        # 相机操作（trigger / read / apply_camera_params）串行化锁。
+        # trigger_once 持锁时间长（包含 grab_timeout_ms）；apply_camera_params 持锁短。
+        # UI 改参数时最坏要等当前 trigger 完成。中途调用 BVCAM_ImageReqAbortAll
+        # 可以唤醒阻塞的 ImageComplete，让 trigger 提前以 status=1 失败 — 这是预期。
+        self._camera_lock = threading.RLock()
         self._started = False
+        # 相机健康标志：open 成功 / grab 成功 → True；grab 抛 BVCameraError → False。
+        # 给底部"相机"状态灯用。掉电/掉线时下一次 grab 会失败，灯随即转红。
+        self._camera_ok = False
 
         # 运行循环控制
         self._loop_thread: Optional[threading.Thread] = None
@@ -269,14 +305,17 @@ class InspectEngine:
             self._camera = BVCamera(uid=cfg.camera_uid)
             self._camera.configure(
                 width=cfg.width, height=cfg.height,
-                acquisition_mode="SingleFrame",
+                acquisition_mode=cfg.acquisition_mode,
+                acquisition_frame_count=cfg.acquisition_frame_count,
                 trigger_mode="On",
                 trigger_source=cfg.trigger_source,
                 exposure_us=cfg.exposure_us,
             )
             self._camera.start()
+            self._camera_ok = True
             logger.info(f"相机就绪: {self._camera.model} sn={self._camera.serial}")
         except BVCameraError as e:
+            self._camera_ok = False
             self._cleanup_partial()
             raise RuntimeError(f"相机初始化失败: {e}") from e
 
@@ -322,6 +361,7 @@ class InspectEngine:
         # 4) 释放硬件
         self._cleanup_partial()
         self._started = False
+        self._camera_ok = False
         logger.info("InspectEngine 已停止")
 
     # ─────────── 热更新（无需重启） ───────────
@@ -337,6 +377,114 @@ class InspectEngine:
         self.config.judge_config = judge_config
         if self._pipeline is not None:
             self._pipeline.set_judge_config(judge_config)
+
+    def read_camera_params(self) -> dict:
+        """从相机硬件实时读所有关键参数 + 当前 InspectEngineConfig 里的软件层参数。
+
+        UI 用这个对比 BV Viewer 持久化的值 vs 程序配置。返回 dict 字段::
+
+            {  # 硬件读
+              'model', 'serial', 'vendor', 'ip_addr', 'mac_addr',
+              'width', 'height',
+              'acquisition_mode', 'acquisition_frame_count',
+              'trigger_mode', 'trigger_source', 'exposure_us',
+              # 软件层（engine 持有）
+              'multiframe_first_wait_s', 'grab_timeout_ms',
+            }
+        """
+        if not self._started or self._camera is None:
+            raise RuntimeError("InspectEngine 未启动，无法读相机参数")
+
+        # 加锁防止跟 trigger_once 并发（GenICam get_feature 跟 ImageReq 不冲突，
+        # 但 BVCam SDK 内部不一定线程安全，保守串行）
+        with self._camera_lock:
+            params = self._camera.read_all_params()
+
+        # 加软件层参数
+        params["multiframe_first_wait_s"] = self.config.multiframe_first_wait_s
+        params["grab_timeout_ms"] = self.config.grab_timeout_ms
+        return params
+
+    def apply_camera_params(self, params: dict) -> None:
+        """热更新相机参数 —— 加锁 + 停采集流 + 重配 + 重启采集流。
+
+        ``params`` 字段同 ``read_camera_params`` 返回值（但 model/serial/ip/mac
+        是只读，会被忽略）。任何字段缺失 = 不动该字段。
+
+        会让当前正在跑的 trigger_once 以 status=1 失败（中途 ImageReqAbortAll），
+        下次 iter 用新参数。
+
+        Raises
+        ------
+        RuntimeError
+            engine 未启动；或相机重配失败。
+        """
+        if not self._started or self._camera is None:
+            raise RuntimeError("InspectEngine 未启动，无法应用相机参数")
+
+        # 1) 先打断可能阻塞的 trigger_once（它在等 ImageComplete）
+        try:
+            self._camera._dll.BVCAM_ImageReqAbortAll(self._camera._h_camera)
+        except Exception as e:
+            logger.debug(f"ImageReqAbortAll 失败（忽略）: {e}")
+
+        with self._camera_lock:
+            # 2) 软件层参数（不动相机，直接改 config）
+            if "multiframe_first_wait_s" in params:
+                self.config.multiframe_first_wait_s = float(
+                    params["multiframe_first_wait_s"]
+                )
+            if "grab_timeout_ms" in params:
+                self.config.grab_timeout_ms = int(params["grab_timeout_ms"])
+
+            # 3) 硬件参数：stop → reconfigure → free image buffer → start
+            #    必须 free + realloc image buffer，因为 Width/Height 改了
+            #    底层 buffer 大小可能不匹配
+            try:
+                self._camera.stop()
+            except Exception as e:
+                logger.warning(f"stop 相机异常（忽略，继续配置）: {e}")
+
+            # configure() 跳过 None 字段
+            cfg_kwargs = {}
+            for key in ("width", "height", "acquisition_mode",
+                        "acquisition_frame_count", "trigger_mode",
+                        "trigger_source", "exposure_us"):
+                if key in params and params[key] is not None:
+                    cfg_kwargs[key] = params[key]
+            if cfg_kwargs:
+                self._camera.configure(**cfg_kwargs)
+                # 同步到 InspectEngineConfig 内存
+                for key in ("width", "height", "acquisition_mode",
+                            "acquisition_frame_count", "trigger_source",
+                            "exposure_us"):
+                    if key in cfg_kwargs:
+                        setattr(self.config, key, cfg_kwargs[key])
+
+            # 重新分配 image buffer（Width/Height 变了底层 buffer 要重建）
+            try:
+                if self._camera._image_alloc is not None:
+                    self._camera._dll.BVCAM_ImageFreeAll(
+                        self._camera._h_camera
+                    )
+                    self._camera._image_alloc = None
+            except Exception as e:
+                logger.warning(f"ImageFreeAll 失败（忽略，start 会重建）: {e}")
+
+            try:
+                self._camera.start()
+            except Exception as e:
+                raise RuntimeError(f"相机重启采集流失败: {e}") from e
+
+        # log 列 key=value 便于诊断（不只列 keys）
+        summary = ", ".join(
+            f"{k}={params[k]}" for k in sorted(params.keys())
+            if k in ("width", "height", "acquisition_mode",
+                     "acquisition_frame_count", "trigger_mode",
+                     "trigger_source", "exposure_us",
+                     "multiframe_first_wait_s", "grab_timeout_ms")
+        )
+        logger.info(f"相机参数已热更新生效: {summary}")
 
     def _cleanup_partial(self) -> None:
         if self._camera is not None:
@@ -372,18 +520,34 @@ class InspectEngine:
         assert self._camera is not None and self._pipeline is not None
 
         try:
-            # 1) 棒号
+            # 1) 抓图（MultiFrame 时一次软触发后会循环收 N 帧 vstack 拼成整图）
+            #    加 _camera_lock：让 UI 的 apply_camera_params 能跟我们串行（中途
+            #    apply_camera_params 拿到锁前会先 ImageReqAbortAll 唤醒我们）
+            with self._camera_lock:
+                try:
+                    frame = self._camera.trigger_and_grab(
+                        timeout_ms=self.config.grab_timeout_ms,
+                        frame_count=self.config.acquisition_frame_count,
+                        first_frame_wait_s=self.config.multiframe_first_wait_s,
+                    )
+                    self._camera_ok = True
+                except BVCameraError:
+                    # grab 失败：可能只是没棒(超时)，也可能真掉线。靠 SDK 探活区分——
+                    # 读得到参数=相机还连着(没棒而已，灯保持绿)，读不到=掉线/断电(灯红)。
+                    # 已持 _camera_lock 且在 worker 线程，调 ping 安全。
+                    self._camera_ok = self._camera.ping()
+                    raise
+
+            # 2) 棒号 — ★ 必须在 grab 之后取 ★
+            #    对齐 Halcon Run.hdev:4619-4631 顺序：BV_GrapImage 完成 → dequeue_message
+            #    时序原因：棒经过扫码枪 → 进相机视野，整个 grab 过程 5-10s，扫码枪在
+            #    grab 期间才扫到当前棒。grab 之前取等于 "上一根棒的码或 NoRead"。
             rod_id = ""
             try:
                 rod_id = self.rod_id_provider() or "NoRead"
             except Exception as e:
                 logger.warning(f"棒号获取失败: {e}; 用 NoRead")
                 rod_id = "NoRead"
-
-            # 2) 抓图
-            frame = self._camera.trigger_and_grab(
-                timeout_ms=self.config.grab_timeout_ms,
-            )
 
             # 3) Pipeline — preprocess 由内部按 dtype 自动判别
             #    keep_label_map + keep_crops + keep_raw_input 都开，便于
@@ -407,6 +571,7 @@ class InspectEngine:
             data = detection_to_inspect_data(
                 result, rod_id=rod_id, inspect_id=inspect_id,
                 raw_frame=raw_frame_for_inspect,
+                pixels_per_mm=self.config.pixels_per_mm,
             )
 
             # 5) 回调 — 兼容 1 参数和 2 参数两种签名（arity 在 __init__ 缓存）
@@ -466,6 +631,9 @@ class InspectEngine:
                         trigger_event.clear()
 
                     iter_no += 1
+                    # ★ Round 8 ★ 更新 worker 心跳时间，供外部 watchdog 检测 hang
+                    self._loop_iter_count = iter_no
+                    self._last_loop_tick_t = time.time()
                     logger.info(f"[WORKER_HB] iter={iter_no} 开始 trigger_once")
                     t0 = time.perf_counter()
                     try:
@@ -511,6 +679,16 @@ class InspectEngine:
     @property
     def is_looping(self) -> bool:
         return self._loop_thread is not None and self._loop_thread.is_alive()
+
+    @property
+    def is_camera_ok(self) -> bool:
+        """相机是否健康（给底部"相机"状态灯用）。
+
+        _camera_ok 语义：open 成功 / grab 成功 / grab 超时但 SDK 探活 OK → True；
+        open 失败 / grab 失败且探活也失败(掉线/断电) → False。
+        没棒导致的 grab 超时不会误判成掉线（探活仍能读到参数）。
+        """
+        return self._started and self._camera is not None and self._camera_ok
 
     @property
     def inspect_count(self) -> int:

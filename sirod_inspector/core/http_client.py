@@ -58,11 +58,20 @@ except ImportError:
 
 
 class MesHttpClient:
-    """MES HTTP 上传客户端（线程安全）"""
+    """MES HTTP 上传客户端（线程安全）
+
+    ★ Round 5 ★ 自带重试队列：upload_ng 失败时调 enqueue_retry(data)，
+    后台定时 flush_retries() 会自动重试。队列 cap 1000 防 MES 长时间宕机时
+    无限堆积。
+    """
 
     def __init__(self, config):
         self.config = config
         self._lock = threading.Lock()
+        # ─── 重试队列 ───
+        from collections import deque
+        self._retry_queue = deque(maxlen=1000)  # 每项：{"data": InspectData-like, "first_failed_at": ts, "retry_count": int}
+        self._retry_lock = threading.Lock()
 
     @property
     def is_enabled(self) -> bool:
@@ -82,10 +91,13 @@ class MesHttpClient:
         # BlockCode
         block_code = str(raw.get("晶编") or inspect_data.rod_id or "")
 
-        # CryptoschisisLength
+        # CryptoschisisLength — 上报 mm（直径口径）。优先 raw_json 显式值，
+        # 其次 max_length_mm（已按 ppm 换算），都没有再退回像素 max_length。
         length_val = raw.get("隐裂长度")
         if length_val is None:
-            length_val = getattr(inspect_data, "max_length", 0.0)
+            length_val = getattr(inspect_data, "max_length_mm", 0.0)
+            if not length_val:
+                length_val = getattr(inspect_data, "max_length", 0.0)
         try:
             crypto_length = float(length_val)
         except (TypeError, ValueError):
@@ -209,6 +221,83 @@ class MesHttpClient:
             f"无法判断业务是否成功，按成功处理。响应体: {str(body)[:300]}"
         )
         return True, self._extract_biz_msg(body) or "无业务状态字段，默认成功"
+
+    # ────────── 重试队列 ──────────
+
+    def enqueue_retry(self, inspect_data) -> None:
+        """upload_ng 失败时由调用方调用，把这次 NG 加进队列等下次重试。
+
+        队列 cap=1000，超过自动丢最老的（防 MES 长时间宕机时进程内存膨胀）。
+        持久化暂不支持（重启丢队列）—— 已经通过 DB 留底，未推到 MES 的 NG 仍可查 DB。
+        """
+        import time as _time
+        rod_id = getattr(inspect_data, "rod_id", None) or "?"
+        with self._retry_lock:
+            self._retry_queue.append({
+                "data": inspect_data,
+                "first_failed_at": _time.time(),
+                "retry_count": 0,
+            })
+            qlen = len(self._retry_queue)
+        logger.info(f"[MES重试入队] rod_id={rod_id}, 当前队列={qlen}")
+
+    def flush_retries(self, max_per_run: int = 10) -> tuple:
+        """尝试 flush 重试队列。一般由 UI 端的 QTimer 周期触发（如 60s）。
+
+        Parameters
+        ----------
+        max_per_run : int
+            单次最多重试条目数（防止一次 flush 卡太久）
+
+        Returns
+        -------
+        (succeeded, remaining): (int, int)
+            (本次成功条目数, 队列剩余条目数)
+        """
+        if not self.is_enabled:
+            return 0, len(self._retry_queue)
+
+        succeeded = 0
+        processed = 0
+        # 限定单次 flush 处理量，避免 MES 长时间宕机时队列 backlog 一次性炸
+        while processed < max_per_run:
+            with self._retry_lock:
+                if not self._retry_queue:
+                    break
+                item = self._retry_queue.popleft()
+            processed += 1
+            data = item["data"]
+            item["retry_count"] += 1
+            try:
+                ok, msg = self.upload_ng(data)
+            except Exception as e:
+                ok, msg = False, f"{type(e).__name__}: {e}"
+            rod_id = getattr(data, "rod_id", "?")
+            if ok:
+                succeeded += 1
+                logger.info(
+                    f"[MES重试成功] rod_id={rod_id}, 第 {item['retry_count']} 次"
+                )
+            else:
+                # 失败，重新入队尾部（再次 cap 1000）
+                with self._retry_lock:
+                    self._retry_queue.append(item)
+                logger.warning(
+                    f"[MES重试失败] rod_id={rod_id}, 第 {item['retry_count']} 次: {msg}"
+                )
+
+        with self._retry_lock:
+            remaining = len(self._retry_queue)
+        if processed > 0:
+            logger.info(
+                f"[MES重试 flush] 本次处理 {processed}, 成功 {succeeded}, "
+                f"剩余 {remaining}"
+            )
+        return succeeded, remaining
+
+    def retry_queue_size(self) -> int:
+        with self._retry_lock:
+            return len(self._retry_queue)
 
     @staticmethod
     def _extract_biz_msg(body: dict) -> str:

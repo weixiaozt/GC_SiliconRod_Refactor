@@ -713,14 +713,23 @@ class OverviewPage(QWidget):
                 " font-weight: bold; border-radius: 3px;"
             )
 
-        # 显示图像 — main_camera 已经在工作线程预渲染了 marked 挂到
-        # data._marked_image（避免 UI 线程扛 draw_marked_full 的 100ms 卡顿）。
-        # 没 marked 时退回 raw（兼容手动塞 InspectData 场景）。
-        # 显式 is None 检查 — `arr or fallback` 在 ndarray 多元素时 raise
-        marked = getattr(data, "_marked_image", None)
-        display_img = marked if marked is not None else data.image
-        if display_img is not None:
-            self._display_image(display_img)
+        # 显示图像
+        # ★ Round 1 优化 ★ 优先用 main_camera 工作线程预生成的 QImage
+        # （已含 .copy()），UI 线程只 QPixmap.fromImage ~2ms。
+        # 没有 QImage 时退回 numpy 路径（UI 线程构造 QImage，~15-30ms）。
+        marked_qimg = getattr(data, "_marked_qimage", None)
+        if marked_qimg is not None:
+            try:
+                pixmap = QPixmap.fromImage(marked_qimg)
+                self._image_viewer.set_image(pixmap)
+            except Exception as e:
+                logger.error(f"显示预生成 QImage 失败，退回 numpy 路径: {e}")
+                marked_qimg = None   # 触发下面 fallback
+        if marked_qimg is None:
+            marked = getattr(data, "_marked_image", None)
+            display_img = marked if marked is not None else data.image
+            if display_img is not None:
+                self._display_image(display_img)
 
         logger.info(
             f"总览更新: total={self._total}, ok={self._ok_count}, "

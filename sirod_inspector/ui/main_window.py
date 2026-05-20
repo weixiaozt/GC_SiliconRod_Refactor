@@ -54,16 +54,16 @@ class MainWindow(QMainWindow):
         topbar_layout.addWidget(title)
         topbar_layout.addSpacing(30)
 
-        # 导航按钮：「参数」和「日志」放最后，默认隐藏；main_camera 模式会启用
+        # 导航按钮：「参数」「日志」「相机」放最后，默认隐藏；main_camera 模式会启用
         tab_names = ["总览", "历史记录", "缺陷图库", "统计报表",
-                     "系统设置", "参数", "日志"]
+                     "系统设置", "参数", "日志", "相机"]
         for i, name in enumerate(tab_names):
             btn = QPushButton(name)
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, idx=i: self._switch_page(idx))
             topbar_layout.addWidget(btn)
             self._nav_buttons.append(btn)
-            if name in ("参数", "日志"):
+            if name in ("参数", "日志", "相机"):
                 btn.setVisible(False)
 
         topbar_layout.addStretch()
@@ -108,7 +108,9 @@ class MainWindow(QMainWindow):
         bottom_layout.setSpacing(16)
 
         self._status_labels = {}
-        for name in ["TCP", "数据库", "飞书","报警灯", "Run.bat"]:
+        # ★ Round 9 ★ 加"扫码枪"独立状态灯（之前误把扫码枪状态贴在"飞书"灯上）
+        # 加"相机"灯：相机模式下反映 BVCamera 连接 / grab 状态（掉电掉线转红）
+        for name in ["TCP", "相机", "数据库", "扫码枪", "飞书", "报警灯", "Run.bat"]:
             lbl = QLabel(f"● {name}")
             lbl.setStyleSheet(
                 "color: #e74c3c; font-size: 11px;"
@@ -154,6 +156,11 @@ class MainWindow(QMainWindow):
                 f"color: {color}; font-size: 11px;"
                 f" background: transparent; border: none;"
             )
+
+    def set_status_visible(self, device: str, visible: bool):
+        """显示/隐藏底部某个设备状态灯（Halcon 模式没有相机/扫码枪灯）"""
+        if device in self._status_labels:
+            self._status_labels[device].setVisible(visible)
 
     def set_status_badge(self, text, color="#27ae60"):
         self._status_badge.setText(text)

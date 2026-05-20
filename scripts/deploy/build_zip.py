@@ -1,5 +1,9 @@
 """
-打盐城部署 zip — 精准排除 logs / pycache / 老 lock 文件
+打部署 zip — 精准排除 logs / pycache / 老 lock 文件
+
+用法::
+    python scripts/deploy/build_zip.py           # 全包：带 EasyLabel runtime（~155MB）
+    python scripts/deploy/build_zip.py --lite    # 轻量：不带 runtime（~33MB，已装过 D:\\EasyLabel_x64 可用）
 """
 
 import zipfile
@@ -10,7 +14,14 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "SiliconRod_v2_deploy.zip"
 
 INCLUDE_DIRS = ["sirod_inspector", "models", "scripts"]
-INCLUDE_FILES = ["DEPLOY_yancheng.md"]
+INCLUDE_FILES = ["DEPLOY.md"]
+
+# EasyLabel AI runtime —— 现场缺 dnninfer.dll / dnndefine.dll 时必带
+# ★ 不要用 MvitSDK_4.1.23.622.exe 安装器，那个之前实测装不出来 ★
+# 直接用预打包 EasyLabel_DL_runtime.zip 解压到 D:\ 就有 D:\EasyLabel_x64\DeepLearning\ 全部 DLL
+SDK_FILES = [
+    "EasyLabel_DL_runtime.zip",
+]
 
 
 def should_exclude(rel_path: str) -> bool:
@@ -36,6 +47,8 @@ def should_exclude(rel_path: str) -> bool:
 
 
 def main():
+    lite = "--lite" in sys.argv
+
     count, total_bytes = 0, 0
     with zipfile.ZipFile(OUT, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for d in INCLUDE_DIRS:
@@ -62,12 +75,34 @@ def main():
             count += 1
             total_bytes += fp.stat().st_size
 
+        # SDK 安装包（默认带，--lite 跳过）
+        if not lite:
+            for f in SDK_FILES:
+                fp = ROOT / f
+                if not fp.is_file():
+                    print(f"WARN: SDK 文件不存在 {f}")
+                    continue
+                size_mb = fp.stat().st_size / 1024 / 1024
+                print(f"打包 runtime: {f}  ({size_mb:.0f} MB)")
+                z.write(fp, f)
+                count += 1
+                total_bytes += fp.stat().st_size
+
     zip_size = OUT.stat().st_size
+    print()
     print(f"打包完成: {OUT}")
+    print(f"  模式: {'轻量（不带 EasyLabel runtime）' if lite else '全包（带 EasyLabel_DL_runtime）'}")
     print(f"  文件数: {count}")
     print(f"  原始大小: {total_bytes/1024/1024:.1f} MB")
     print(f"  zip 大小: {zip_size/1024/1024:.1f} MB "
           f"(压缩比 {(1 - zip_size/total_bytes)*100:.0f}%)")
+    if not lite:
+        print()
+        print("现场部署：")
+        print("  1) 解压 zip → D:\\SiliconRod_v2\\")
+        print("  2) 解压 EasyLabel_DL_runtime.zip → 直接到 D:\\ 根目录（产出 D:\\EasyLabel_x64\\）")
+        print("  3) 双击 scripts\\deploy\\check_deps.bat 看红绿灯")
+        print("  4) 双击 scripts\\deploy\\新版本.bat 启动")
 
 
 if __name__ == "__main__":

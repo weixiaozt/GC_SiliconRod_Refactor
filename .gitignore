@@ -4,6 +4,7 @@ tests/outputs/
 tests/_diag*.txt
 *.log
 logs/
+.claude/
 .venv/
 源码备份/
 # 现场图源（很大，不入库）
@@ -12,8 +13,31 @@ source_image/*.zip.*
 source_image/*.tif
 source_image/ImageRaw/
 
-# 部署 zip — 33MB 二进制，按需重新打包（python scripts/deploy/build_zip.py）
+# 部署 zip — 33-376MB 二进制，按需重新打包（python scripts/deploy/build_zip.py）
 SiliconRod_v2_deploy.zip
+# 解压 zip 出来的临时部署目录
+SiliconRod_v2_deploy/
+
+# 从开发机直接打的 EasyLabel CPU 运行时（~124MB），按需重新打包
+EasyLabel_DL_runtime.zip
+
+# 第三方 SDK 安装包（268MB exe + 76MB demo，超 GitHub 100MB 限制）
+# 部署机需要单独装：参考 DEPLOY.md
+第三方AI推理SDK/
+
+# 大体积测试输出（推理 crop 等）
+tests/outputs/
+
+# config.json 本地备份（用户 dev/yancheng 切换时手动备份）
+sirod_inspector/config.json.v1.bak
+sirod_inspector/config.*.bak
+sirod_inspector/config.json.before-*
+
+# 项目根目录的 config.json（现场实际部署使用，含敏感数据，不入库）
+/config.json
+
+# 部署前 hash 校验生成的临时清单
+code_hash.txt
 
 # 测试图（414 张 .bmp，太大）
 test_image/*.bmp

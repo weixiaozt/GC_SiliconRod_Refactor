@@ -1,12 +1,37 @@
 {
-    "_comment": "盐城部署 v2 模板 — 跟老版本（Halcon+Python）完全隔离的配置。复制为 config.json 后按现场改 IP / 表名 / 端口 / MES URL。",
+    "_comment": "v2 部署模板。复制为 sirod_inspector/config.json 后按现场改: database / serial / image_store / scanner.host / line_id。",
+
     "tcp": {
-        "_comment": "扫码枪 / Halcon 通信。生产用相机模式时可保持默认；若两套同时跑要换端口避免冲突",
+        "_comment": "Halcon 兜底模式才用（main.py），相机模式 main_camera.py 不用",
         "host": "127.0.0.1",
         "port": 3000
     },
+
+    "scanner": {
+        "_comment": "海康 MV-ID 系列 TCP 触发协议。host 改成现场扫码枪 IP。poll_interval_s = 周期发 'start' 触发文本的间隔。",
+        "enabled": true,
+        "host": "192.168.12.56",
+        "port": 5000,
+        "poll_interval_s": 5.0,
+        "recv_timeout_s": 1.0,
+        "reconnect_interval_s": 3.0
+    },
+
+    "camera": {
+        "_comment": "MultiFrame 100x150 = 15000 行拼图（盐城现场参数）。callback 模式接图。grab_timeout_ms 给 20s 等编码器转动。",
+        "width": 1024,
+        "height": 100,
+        "acquisition_mode": "MultiFrame",
+        "acquisition_frame_count": 150,
+        "multiframe_first_wait_s": 5.0,
+        "exposure_us": 100.0,
+        "trigger_source": "Software",
+        "grab_timeout_ms": 20000,
+        "loop_interval_s": 2.0
+    },
+
     "database": {
-        "_comment": "★ v2 用独立表名，不污染老表 squarstickresult。新表程序首次启动自动 CREATE",
+        "_comment": "★ v2 用独立表名 squarstickresult_v2，不污染老 squarstickresult 表。新表程序首次启动自动 CREATE",
         "host": "现场 MySQL IP",
         "port": 3306,
         "user": "root",
@@ -14,14 +39,16 @@
         "database": "b_xmartsql",
         "table": "squarstickresult_v2"
     },
+
     "feishu": {
-        "_comment": "★ v2 调试期 false — 别让现场飞书机器人收双份",
+        "_comment": "★ 调试期 false — 别让现场飞书机器人收双份",
         "enabled": false,
         "app_id": "",
         "app_secret": "",
         "table_id": "",
         "base_url": "https://open.feishu.cn/open-apis"
     },
+
     "image_store": {
         "_comment": "★ v2 独立存图根目录，不覆盖老版 D:/SiRod",
         "enabled": true,
@@ -30,15 +57,20 @@
         "web_image_dir": "D:/SiRod_v2/WebImage",
         "web_url_base": "http://现场服务器IP:端口/v2"
     },
+
     "shift": {
-        "reset_times": [
-            "08:00",
-            "20:00"
-        ]
+        "reset_times": ["08:00", "20:00"]
     },
+
+    "scale": {
+        "_comment": "★ 现场必须用标准件标定 ★ pixels_per_mm=每毫米对应多少像素。仅影响显示/MES 上报的 mm 值，不影响判定。长度=直径口径(2×外接圆半径/ppm)，面积=像素/ppm²。<=0 不显示 mm。",
+        "pixels_per_mm": 10.0
+    },
+
     "line_id": "PV-B02",
+
     "serial": {
-        "_comment": "★ 同一 COM 一次只能一个进程占用 — 跑 v2 前任务管理器先关老版 python",
+        "_comment": "★ 报警灯串口。同一 COM 一次只能一个进程占用 — 启动前先关老 python",
         "enabled": true,
         "port": "COM3",
         "baudrate": 9600,
@@ -46,11 +78,11 @@
         "ng_signal": "A0 00 01 CC",
         "reset_signal": "A0 00 00 CC"
     },
-    "alarm": {
-        "enabled": true
-    },
+
+    "alarm": {"enabled": true},
+
     "http": {
-        "_comment": "★ v2 调试期 false — 别让 MES 收双份记录。稳定后翻 true 切换",
+        "_comment": "★ 调试期 false — 别让 MES 收双份。稳定后翻 true 切换",
         "enabled": false,
         "url": "http://10.31.20.29/MesAPI/Api/WMSToMESByProcedure",
         "timeout": 10,
@@ -63,8 +95,9 @@
             "BACKUP2": "GRZ_V2"
         }
     },
+
     "judge": {
-        "_comment": "判定参数 — 装好后用 UI 的 参数 tab 现场调，配置变更即时生效（iter24 热加载）",
+        "_comment": "★ 判定参数。UI 的『参数』tab 可现场调，配置变更即时热加载（iter24+）",
         "max_area": 10.0,
         "sum_area": 10.0,
         "max_count": 10,

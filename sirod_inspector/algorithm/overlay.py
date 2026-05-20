@@ -105,8 +105,14 @@ def _put_texts_batch(img_bgr: np.ndarray,
     pil = Image.fromarray(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
     font = _get_font(font_size)
+    W, H = pil.size
     for xy, text, color, bg in items:
         x, y = xy
+        # 夹紧到图像内：贴右/上边缘的缺陷，标签往左/下挪，避免跑出画面被截断
+        tb = draw.textbbox((0, 0), text, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        x = min(max(0, x), max(0, W - tw - pad - 1))
+        y = min(max(0, y), max(0, H - th - pad - 1))
         bbox = draw.textbbox((x, y), text, font=font)
         if bg is not None:
             draw.rectangle(
@@ -160,8 +166,11 @@ def draw_marked_full(image_gray: np.ndarray,
     vis = to_bgr(image_gray)
     rows, cols = image_gray.shape[:2]
 
-    # 1) 叠 mask（label_map 半透明覆盖）
-    if label_map is not None and label_map.any():
+    # 1) mask 染色已禁用（按现场要求：只要框 + 类别名，不要半透明色块）
+    #    保留 label_map 参数兼容旧调用方，但不再渲染 mask 覆盖。
+    #    如需恢复，把下面 _DRAW_MASK 改 True。
+    _DRAW_MASK = False
+    if _DRAW_MASK and label_map is not None and label_map.any():
         lm = label_map
         if lm.shape != (rows, cols):
             lm = cv2.resize(lm, (cols, rows), interpolation=cv2.INTER_NEAREST)
@@ -172,8 +181,12 @@ def draw_marked_full(image_gray: np.ndarray,
             overlay[lm == lab] = color_for_label(int(lab))
         vis = cv2.addWeighted(overlay, mask_alpha, vis, 1.0 - mask_alpha, 0)
 
-    # 2) 画每个缺陷的外接矩形
-    rect_thickness = max(2, max(rows, cols) // 800)
+    # 2) 画每个缺陷的外接矩形 —— ★ 框向外扩 box_gap 再画 ★
+    #    小缺陷只有十几像素时，紧贴 bbox 的粗描边会把缺陷整个盖住看不清。
+    #    向外扩一圈留缝，让缺陷完整露在框内部、线条不压到缺陷本体。
+    #    线宽设上限（≤4），避免大图上 //800 算出过粗的边。
+    rect_thickness = max(2, min(max(rows, cols) // 800, 4))
+    box_gap = rect_thickness + 5             # 框与缺陷之间的留白（比线宽大）
     for d in defects:
         x, y, w, h = d.bbox
         if d.class_name in ng_trigger_classes:
@@ -182,7 +195,11 @@ def draw_marked_full(image_gray: np.ndarray,
             color = (0, 200, 255)           # 黄 = 非 NG 类
         else:
             color = (200, 200, 200)         # 灰 = 未分类
-        cv2.rectangle(vis, (x, y), (x + w, y + h), color, rect_thickness)
+        x0 = max(0, x - box_gap)
+        y0 = max(0, y - box_gap)
+        x1 = min(cols - 1, x + w + box_gap)
+        y1 = min(rows - 1, y + h + box_gap)
+        cv2.rectangle(vis, (x0, y0), (x1, y1), color, rect_thickness)
 
     # 3) 标类别名 — 所有文本一次 PIL 转换内画完（之前每个缺陷各转一次，
     #    10 个缺陷 = 10 次 BGR↔RGB 抖动，每次 ~10ms 在 3072×1024 上）
@@ -196,10 +213,12 @@ def draw_marked_full(image_gray: np.ndarray,
             txt_color = (0, 0, 0); bg = (0, 200, 255)
         else:
             txt_color = (255, 255, 255); bg = (100, 100, 100)
-        label = (f"{d.class_name} {d.class_confidence:.2f}"
-                 if d.class_name else f"a={d.area} r={d.outer_radius:.1f}")
-        ty = max(0, y - font_size - 6)
-        text_items.append(((x, ty), label, txt_color, bg))
+        # 图上只标类别名；置信度/长度/面积进数据/MES/日志，不挤在框上（防遮挡+出界）
+        label = d.class_name or "未分类"
+        # 文字贴在「外扩后框」的左上角上方，跟框对齐（出界由 _put_texts_batch 兜底夹紧）
+        tx = max(0, x - box_gap)
+        ty = max(0, y - box_gap - font_size - 6)
+        text_items.append(((tx, ty), label, txt_color, bg))
     if text_items:
         vis = _put_texts_batch(vis, text_items, font_size=font_size)
 
@@ -218,30 +237,27 @@ def draw_marked_crop(crop_gray: np.ndarray,
     vis = to_bgr(crop_gray)
     rows, cols = crop_gray.shape[:2]
 
-    # 简单阈值估计缺陷像素：crop 内灰度异常区域
-    # （比直接调用 seg 模型轻得多，且在 crop 局部足够准）
-    mean_g = float(crop_gray.mean())
-    std_g  = float(crop_gray.std())
-    # 暗缺陷（像素显著低于均值）— 大多数隐裂/崩边特征
-    dark_thr = max(0, mean_g - 1.5 * std_g)
-    mask = (crop_gray < dark_thr).astype(np.uint8)
-    # 形态学清噪
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # mask 染色已禁用（按现场要求：只要类别名标签，不要半透明色块）
+    # 保留阈值估计代码但不再渲染。如需恢复，把下面 _DRAW_MASK 改 True。
+    _DRAW_MASK = False
+    if _DRAW_MASK:
+        mean_g = float(crop_gray.mean())
+        std_g  = float(crop_gray.std())
+        dark_thr = max(0, mean_g - 1.5 * std_g)
+        mask = (crop_gray < dark_thr).astype(np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        if mask.any():
+            if defect.class_name:
+                color = color_for_label(defect.class_name)
+            else:
+                color = (0, 200, 255)
+            overlay = vis.copy()
+            overlay[mask > 0] = color
+            vis = cv2.addWeighted(overlay, mask_alpha, vis, 1.0 - mask_alpha, 0)
 
-    if mask.any():
-        if defect.class_name:
-            # 按类别名取色（跨进程稳定 — 不用 builtin hash，因为它每次
-            # Python 启动重随机化，会让同一类别每次不同色）
-            color = color_for_label(defect.class_name)
-        else:
-            color = (0, 200, 255)
-        overlay = vis.copy()
-        overlay[mask > 0] = color
-        vis = cv2.addWeighted(overlay, mask_alpha, vis, 1.0 - mask_alpha, 0)
-
-    # 标类别 + 置信度
+    # 小图上只标类别名（小图本就在缺陷库/存档里看，数值另有字段）
     if defect.class_name:
-        label = f"{defect.class_name} {defect.class_confidence:.2f}"
+        label = defect.class_name
         font_size = max(14, min(rows, cols) // 12)
         vis = _put_text(vis, label, (4, 4), font_size=font_size,
                          color=(255, 255, 255), bg=(0, 0, 0))

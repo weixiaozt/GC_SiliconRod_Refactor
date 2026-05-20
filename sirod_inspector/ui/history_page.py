@@ -119,18 +119,53 @@ class HistoryPage(QWidget):
         self._load_data()
 
     def _load_data(self):
+        """★ 异步 ★ — DB 查询扔到 QThreadPool，UI 不卡。"""
         if not self._db or not self._db.is_connected:
             return
+        if getattr(self, "_loading", False):
+            return  # 上一次还没回来
+        self._loading = True
+
         rod_id = self._search_input.text().strip() or None
         result = self._result_combo.currentText()
         date_from = self._date_from.date().toString("yyyy-MM-dd") + " 00:00:00"
         date_to = self._date_to.date().toString("yyyy-MM-dd") + " 23:59:59"
 
-        records, total = self._db.query_records(
+        # 临时提示加载中
+        self._page_info.setText("加载中...")
+
+        from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+
+        class _Signals(QObject):
+            done = pyqtSignal(object, int)  # (records, total)
+            error = pyqtSignal(str)
+
+        class _Task(QRunnable):
+            def __init__(self, db, **kw):
+                super().__init__()
+                self.db = db
+                self.kw = kw
+                self.signals = _Signals()
+            def run(self):
+                try:
+                    records, total = self.db.query_records(**self.kw)
+                    self.signals.done.emit(records, total)
+                except Exception as e:
+                    self.signals.error.emit(f"{type(e).__name__}: {e}")
+
+        task = _Task(
+            self._db,
             date_from=date_from, date_to=date_to,
             rod_id=rod_id, result=result,
             page=self._page, page_size=self._page_size,
         )
+        task.signals.done.connect(self._on_load_done)
+        task.signals.error.connect(self._on_load_error)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_load_done(self, records, total):
+        """后台 DB 查完，回主线程刷表格"""
+        self._loading = False
         self._total = total
         total_pages = max(1, (total + self._page_size - 1) // self._page_size)
         self._page_info.setText(f"第 {self._page} 页 / 共 {total_pages} 页 (共 {total} 条)")
@@ -155,6 +190,10 @@ class HistoryPage(QWidget):
             self._table.setItem(row, 5, QTableWidgetItem(str(rec.get("defect_count", 0))))
             self._table.setItem(row, 6, QTableWidgetItem(str(rec.get("duration_ms", 0))))
             self._table.setItem(row, 7, QTableWidgetItem(rec.get("line_id", "")))
+
+    def _on_load_error(self, err):
+        self._loading = False
+        self._page_info.setText(f"加载失败: {err}")
 
     def _prev_page(self):
         if self._page > 1:

@@ -43,6 +43,10 @@ from .overlay import (
     draw_marked_crop,
     color_for_label,
 )
+from .units import (
+    radius_px_to_length_mm,
+    area_px_to_mm2,
+)
 
 __all__ = [
     # inference
@@ -57,4 +61,6 @@ __all__ = [
     "Pipeline", "DetectionResult", "ClassifiedDefect", "NG_TRIGGER_CLASSES",
     # overlay
     "draw_marked_full", "draw_marked_crop", "color_for_label",
+    # units
+    "radius_px_to_length_mm", "area_px_to_mm2",
 ]

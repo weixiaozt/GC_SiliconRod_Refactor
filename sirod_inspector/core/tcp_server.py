@@ -74,9 +74,14 @@ class InspectData:
     image: Optional[np.ndarray] = None      # HxW 或 HxWx3 numpy 数组
     defect_type: str = ""                   # 缺陷类型（来自 JSON "类型"，如 "隐裂"、"崩边"）
     defect_count: int = 0                   # 缺陷个数（来自 JSON "个数"）
-    max_area: float = 0.0                   # 最大缺陷面积
-    total_area: float = 0.0                 # 缺陷总面积
-    max_length: float = 0.0                 # 最大缺陷长度
+    max_area: float = 0.0                   # 最大缺陷面积（像素²，内部/DB 口径）
+    total_area: float = 0.0                 # 缺陷总面积（像素²）
+    max_length: float = 0.0                 # 最大缺陷长度（像素，= outer_radius 半径，内部/DB 口径）
+    # ↓ 显示/上报层换算值（mm）。长度按「直径」算 = 2×outer_radius / ppm；面积 = px / ppm²。
+    #   ppm 未标定（<=0）时统一为 0.0。内部判定/DB 仍用上面的像素口径。
+    max_length_mm: float = 0.0              # 最大缺陷长度（mm，直径口径，给人看/上报 MES）
+    max_area_mm2: float = 0.0               # 最大缺陷面积（mm²）
+    total_area_mm2: float = 0.0             # 缺陷总面积（mm²）
     inspect_id: int = 0                     # 检测 ID
     quality: int = 0                        # 质量（0=OK, 1=NG，来自 JSON "质量"）
     ct: float = 0.0                         # 检测时长（毫秒，来自 JSON "检测时长"）

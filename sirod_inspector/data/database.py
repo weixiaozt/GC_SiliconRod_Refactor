@@ -41,7 +41,7 @@ except ImportError:
 # 用于 CREATE TABLE 和 ALTER TABLE ADD COLUMN
 _EXPECTED_COLUMNS = [
     ("id",            "BIGINT AUTO_INCREMENT PRIMARY KEY",                    "自增主键"),
-    ("ID",            "BIGINT DEFAULT 0",                                     "检测ID"),
+    ("InspectID",     "BIGINT DEFAULT 0",                                     "检测ID（业务）"),
     ("SquareNumber",  "VARCHAR(50) DEFAULT ''",                               "晶棒编号"),
     ("Quality",       "INT DEFAULT 0",                                        "质量(0=OK,1=NG)"),
     ("DefectNumber",  "INT DEFAULT 0",                                        "缺陷数量"),
@@ -69,7 +69,7 @@ _EXPECTED_COLUMNS = [
 # 新表必须有的列（不含旧兼容列），用于 CREATE TABLE
 _NEW_COLUMNS = [
     ("id",            "BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '自增主键'"),
-    ("ID",            "BIGINT DEFAULT 0 COMMENT '检测ID'"),
+    ("InspectID",     "BIGINT DEFAULT 0 COMMENT '检测ID（业务）'"),
     ("SquareNumber",  "VARCHAR(50) DEFAULT '' COMMENT '晶棒编号'"),
     ("Quality",       "INT DEFAULT 0 COMMENT '质量(0=OK,1=NG)'"),
     ("DefectNumber",  "INT DEFAULT 0 COMMENT '缺陷数量'"),
@@ -86,7 +86,7 @@ _NEW_COLUMNS = [
 
 # 需要自动补全的列（当旧表存在但缺少这些列时，自动 ALTER TABLE ADD COLUMN）
 _COLUMNS_TO_ADD = {
-    "ID":            "BIGINT DEFAULT 0 COMMENT '检测ID'",
+    "InspectID":     "BIGINT DEFAULT 0 COMMENT '检测ID（业务）'",
     "SquareNumber":  "VARCHAR(50) DEFAULT '' COMMENT '晶棒编号'",
     "Quality":       "INT DEFAULT 0 COMMENT '质量(0=OK,1=NG)'",
     "DefectNumber":  "INT DEFAULT 0 COMMENT '缺陷数量'",
@@ -132,7 +132,7 @@ class Database:
                 host=self._config.get("host", "127.0.0.1"),
                 port=int(self._config.get("port", 3306)),
                 user=self._config.get("user", "root"),
-                password=self._config.get("password", "123456"),
+                password=self._config.get("password", ""),
                 database=self._config.get("database", "b_xmartsql"),
                 charset="utf8mb4",
                 autocommit=True,
@@ -418,7 +418,7 @@ class Database:
 
         # 字段名 → 值 的映射（新字段）
         field_map = {
-            "ID":            kwargs.get("inspect_id", 0),
+            "InspectID":     kwargs.get("inspect_id", 0),
             "SquareNumber":  kwargs.get("rod_id", ""),
             "Quality":       kwargs.get("quality", 0),
             "DefectNumber":  kwargs.get("defect_count", 0),
