@@ -52,3 +52,6 @@ scripts/deploy/SiRodLauncher.exe
 build/
 dist/
 *.spec
+
+# IDE 工程配置（PyCharm / IntelliJ）
+.idea/
