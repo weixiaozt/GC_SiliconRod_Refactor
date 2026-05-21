@@ -47,6 +47,7 @@ def project_root() -> Path:
 
 PROJECT_DIR = project_root()
 LOG_FILE = PROJECT_DIR / "sirod_inspector" / "logs" / "launcher.log"
+CHILD_LOG = PROJECT_DIR / "sirod_inspector" / "logs" / "launcher_child.log"
 
 
 def log_line(msg: str) -> None:
@@ -56,6 +57,16 @@ def log_line(msg: str) -> None:
             f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n")
     except Exception:
         # 日志写不进去也不能让 watchdog 崩掉
+        pass
+
+
+def _dump_child_tail(max_chars: int = 3000) -> None:
+    """异常退出时，把子进程输出末尾抄进 launcher.log，便于一个文件看全报错。"""
+    try:
+        text = CHILD_LOG.read_text(encoding="utf-8", errors="replace")
+        tail = text[-max_chars:] if len(text) > max_chars else text
+        log_line("--- 子进程输出(末尾) ---\n" + tail.strip() + "\n--- 子进程输出结束 ---")
+    except Exception:
         pass
 
 
@@ -98,16 +109,35 @@ def _child_env() -> dict:
 
 
 def run_once(python_exe: str) -> tuple[int, int]:
-    """启动一次目标进程，阻塞到它退出。返回 (退出码, 运行秒数)。"""
+    """启动一次目标进程，阻塞到它退出。返回 (退出码, 运行秒数)。
+
+    子进程 stdout/stderr 重定向到 launcher_child.log —— exe 是 --noconsole，
+    否则崩溃时的 traceback / DLL 加载错全看不到。每次启动覆盖写。
+    """
     start = time.monotonic()
     # CREATE_NO_WINDOW：即便退化用了 python.exe 也不闪控制台
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    proc = subprocess.run(
-        [python_exe, str(PROJECT_DIR / TARGET_REL)],
-        cwd=str(PROJECT_DIR),
-        creationflags=flags,
-        env=_child_env(),
-    )
+    child_log = None
+    try:
+        CHILD_LOG.parent.mkdir(parents=True, exist_ok=True)
+        child_log = CHILD_LOG.open("w", encoding="utf-8", errors="replace")
+    except Exception:
+        child_log = None
+    try:
+        proc = subprocess.run(
+            [python_exe, str(PROJECT_DIR / TARGET_REL)],
+            cwd=str(PROJECT_DIR),
+            creationflags=flags,
+            env=_child_env(),
+            stdout=child_log,
+            stderr=subprocess.STDOUT,
+        )
+    finally:
+        if child_log is not None:
+            try:
+                child_log.close()
+            except Exception:
+                pass
     lifetime = int(time.monotonic() - start)
     return proc.returncode, lifetime
 
@@ -146,6 +176,8 @@ def main() -> int:
         log_line(f"启动 main_camera.py (累计重启 {restart_count} 次)")
         rc, lifetime = run_once(python_exe)
         log_line(f"main_camera 退出 rc={rc} 运行时长={lifetime}s")
+        if rc != 0:
+            _dump_child_tail()
 
         action, restart_count = classify_exit(rc, lifetime, restart_count)
 
