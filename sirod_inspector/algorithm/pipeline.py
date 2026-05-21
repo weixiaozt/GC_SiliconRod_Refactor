@@ -503,6 +503,10 @@ class Pipeline:
 
             classified.class_name = cls.name
             classified.class_confidence = float(cls.confidence)
+            logger.info(
+                f"缺陷#{i} 分类={cls.name} 置信度={cls.confidence:.3f} "
+                f"area={classified.area} r={classified.outer_radius:.1f}"
+            )
 
         # ── 按 per-class 规则做最终 NG 判定 ──
         verdict = judge_per_class(result.defects, self.class_rules)

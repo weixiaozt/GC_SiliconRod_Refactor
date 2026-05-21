@@ -3,6 +3,7 @@
 """
 import logging
 import datetime
+import json
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -10,6 +11,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLineEdit, QComboBox, QDateEdit,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QFrame, QFileDialog, QMessageBox,
+    QDialog, QDialogButtonBox,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,7 @@ class HistoryPage(QWidget):
         self._page = 1
         self._page_size = 20
         self._total = 0
+        self._records = []
         self._init_ui()
 
     def set_database(self, db):
@@ -92,6 +95,7 @@ class HistoryPage(QWidget):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
+        self._table.cellDoubleClicked.connect(self._show_defect_detail)
         layout.addWidget(self._table, 1)
 
         # 分页栏
@@ -166,6 +170,7 @@ class HistoryPage(QWidget):
     def _on_load_done(self, records, total):
         """后台 DB 查完，回主线程刷表格"""
         self._loading = False
+        self._records = records
         self._total = total
         total_pages = max(1, (total + self._page_size - 1) // self._page_size)
         self._page_info.setText(f"第 {self._page} 页 / 共 {total_pages} 页 (共 {total} 条)")
@@ -194,6 +199,64 @@ class HistoryPage(QWidget):
     def _on_load_error(self, err):
         self._loading = False
         self._page_info.setText(f"加载失败: {err}")
+
+    def _show_defect_detail(self, row, _col):
+        """双击某根棒 → 弹窗显示该棒所有缺陷明细（类别/置信度/面积/长度，px + mm）。"""
+        if row < 0 or row >= len(self._records):
+            return
+        rec = self._records[row]
+        raw = rec.get("DefectsJSON") or rec.get("defects_json") or ""
+        rod = rec.get("rod_id", "") or rec.get("SquareNumber", "")
+        try:
+            defects = json.loads(raw) if raw else []
+        except (ValueError, TypeError):
+            defects = []
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"缺陷明细 — {rod}")
+        dlg.resize(720, 320)
+        v = QVBoxLayout(dlg)
+
+        if not defects:
+            v.addWidget(QLabel(
+                "该记录无缺陷明细。\n"
+                "（OK 且无缺陷，或为此功能上线前检测的旧数据）"
+            ))
+        else:
+            def _fmt(x, nd=2):
+                try:
+                    return f"{float(x):.{nd}f}"
+                except (ValueError, TypeError):
+                    return "-"
+
+            headers = ["#", "类别", "置信度", "面积(px²)", "面积(mm²)",
+                       "长度(px·半径)", "长度(mm·直径)"]
+            tbl = QTableWidget()
+            tbl.setColumnCount(len(headers))
+            tbl.setHorizontalHeaderLabels(headers)
+            tbl.horizontalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.Stretch)
+            tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            tbl.verticalHeader().setVisible(False)
+            tbl.setRowCount(len(defects))
+            for i, d in enumerate(defects):
+                cells = [
+                    str(i + 1),
+                    str(d.get("class_name") or "未分类"),
+                    _fmt(d.get("class_confidence"), 3),
+                    _fmt(d.get("area"), 0),
+                    _fmt(d.get("area_mm2"), 2),
+                    _fmt(d.get("outer_radius"), 2),
+                    _fmt(d.get("length_mm"), 2),
+                ]
+                for c, text in enumerate(cells):
+                    tbl.setItem(i, c, QTableWidgetItem(text))
+            v.addWidget(tbl)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        v.addWidget(btns)
+        dlg.exec()
 
     def _prev_page(self):
         if self._page > 1:

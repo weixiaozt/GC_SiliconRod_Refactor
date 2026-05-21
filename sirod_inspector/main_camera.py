@@ -24,6 +24,7 @@ import datetime
 import threading
 import time
 import traceback
+import json
 
 # ── 路径设置 ──
 _PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -844,6 +845,11 @@ class SiRodCameraApp(QObject):
                             ct=getattr(data, 'ct', 0.0),
                             check_time=getattr(data, 'check_time', ''),
                             upload_time=getattr(data, 'upload_time', ''),
+                            defects_json=json.dumps(
+                                data.raw_json.get("defects", [])
+                                if isinstance(data.raw_json, dict) else [],
+                                ensure_ascii=False,
+                            ),
                         )
                     except Exception as e:
                         logger.error(f"写入数据库失败: {e}", exc_info=True)

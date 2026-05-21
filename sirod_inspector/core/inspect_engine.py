@@ -142,7 +142,9 @@ def detection_to_inspect_data(
                 {
                     "bbox": d.bbox,
                     "area": d.area,
+                    "area_mm2": area_px_to_mm2(d.area, pixels_per_mm),
                     "outer_radius": d.outer_radius,
+                    "length_mm": radius_px_to_length_mm(d.outer_radius, pixels_per_mm),
                     "class_name": d.class_name,
                     "class_confidence": d.class_confidence,
                 }

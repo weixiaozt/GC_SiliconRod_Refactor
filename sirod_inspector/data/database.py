@@ -54,6 +54,7 @@ _EXPECTED_COLUMNS = [
     ("UploadTime",    "DATETIME DEFAULT CURRENT_TIMESTAMP",                   "数据上传时间"),
     ("ImagePath",     "TEXT DEFAULT NULL",                                    "图像存储路径"),
     ("LineID",        "VARCHAR(20) DEFAULT 'PV-B02'",                         "产线标识"),
+    ("DefectsJSON",   "TEXT DEFAULT NULL",                                    "缺陷明细JSON"),
     # 兼容旧字段（如果旧表中有这些字段，保留不删除）
     ("rod_id",        "VARCHAR(50) DEFAULT ''",                               "晶棒编号(旧)"),
     ("inspect_time",  "DATETIME DEFAULT CURRENT_TIMESTAMP",                   "检测时间(旧)"),
@@ -82,6 +83,7 @@ _NEW_COLUMNS = [
     ("UploadTime",    "DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '数据上传时间'"),
     ("ImagePath",     "TEXT DEFAULT NULL COMMENT '图像存储路径'"),
     ("LineID",        "VARCHAR(20) DEFAULT 'PV-B02' COMMENT '产线标识'"),
+    ("DefectsJSON",   "TEXT DEFAULT NULL COMMENT '缺陷明细JSON(每缺陷:类别/置信度/面积px+mm²/长度px+mm)'"),
 ]
 
 # 需要自动补全的列（当旧表存在但缺少这些列时，自动 ALTER TABLE ADD COLUMN）
@@ -99,6 +101,7 @@ _COLUMNS_TO_ADD = {
     "UploadTime":    "DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '数据上传时间'",
     "ImagePath":     "TEXT DEFAULT NULL COMMENT '图像存储路径'",
     "LineID":        "VARCHAR(20) DEFAULT 'PV-B02' COMMENT '产线标识'",
+    "DefectsJSON":   "TEXT DEFAULT NULL COMMENT '缺陷明细JSON(每缺陷:类别/置信度/面积px+mm²/长度px+mm)'",
 }
 
 
@@ -282,7 +285,8 @@ class Database:
                     max_area: float = 0.0, total_area: float = 0.0,
                     max_length: float = 0.0, ct: float = 0.0,
                     check_time: str = "", upload_time: str = "",
-                    duration_ms: int = 0) -> bool:
+                    duration_ms: int = 0,
+                    defects_json: str = "") -> bool:
         """
         保存检测结果到数据库。
 
@@ -354,6 +358,7 @@ class Database:
                 line_id=line_id,
                 result=result,
                 duration_ms=duration_ms,
+                defects_json=defects_json,
                 now=now,
             )
 
@@ -431,6 +436,7 @@ class Database:
             "UploadTime":    kwargs.get("upload_time", ""),
             "ImagePath":     kwargs.get("image_path"),
             "LineID":        kwargs.get("line_id", "PV-B02"),
+            "DefectsJSON":   kwargs.get("defects_json", ""),
             # 旧字段兼容
             "rod_id":        kwargs.get("rod_id", ""),
             "inspect_time":  kwargs.get("now"),
