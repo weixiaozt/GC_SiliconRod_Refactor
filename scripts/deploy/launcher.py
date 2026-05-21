@@ -79,6 +79,24 @@ def message_box(text: str, title: str) -> None:
         print(f"[{title}] {text}", file=sys.stderr)
 
 
+def _child_env() -> dict:
+    """子进程环境 —— 摘掉 PyInstaller 注入 PATH 的 _MEIPASS 临时目录。
+
+    冻结成 onefile exe 后，PyInstaller 把解包临时目录 sys._MEIPASS 塞到 PATH
+    最前面。子进程 pythonw 继承后，加载原生 DLL（如 EasyLabel 推理 DLL）时会
+    优先撞上 bundle 自带的 VC 运行时等依赖 → 版本不符 → “无法定位程序输入点”。
+    这里把 _MEIPASS 从 PATH 摘掉，让子进程拿到和命令行/旧 vbs 一致的干净环境。
+    源码方式运行（无 _MEIPASS）时原样返回。
+    """
+    env = os.environ.copy()
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        kept = [p for p in env.get("PATH", "").split(os.pathsep)
+                if p and os.path.normpath(p) != os.path.normpath(meipass)]
+        env["PATH"] = os.pathsep.join(kept)
+    return env
+
+
 def run_once(python_exe: str) -> tuple[int, int]:
     """启动一次目标进程，阻塞到它退出。返回 (退出码, 运行秒数)。"""
     start = time.monotonic()
@@ -88,6 +106,7 @@ def run_once(python_exe: str) -> tuple[int, int]:
         [python_exe, str(PROJECT_DIR / TARGET_REL)],
         cwd=str(PROJECT_DIR),
         creationflags=flags,
+        env=_child_env(),
     )
     lifetime = int(time.monotonic() - start)
     return proc.returncode, lifetime
