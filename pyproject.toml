@@ -35,6 +35,10 @@ dev = [
     "ruff",
 ]
 
+# 生成 Word 部署手册用（sirod_inspector/gen_manual.py import docx）。
+# 非主程序运行时依赖，按需启用：uv sync --extra docs
+docs = ["python-docx"]
+
 [project.scripts]
 # 入口快捷方式：`uv run sirod-camera` 等价于 `python sirod_inspector/main_camera.py`
 sirod-camera = "sirod_inspector.main_camera:main"
