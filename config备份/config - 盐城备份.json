@@ -1,0 +1,171 @@
+{
+    "tcp": {
+        "host": "192.168.12.56",
+        "port": 5000
+    },
+    "database": {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "user": "root",
+        "password": "",
+        "database": "b_xmartsql",
+        "table": "squarstickresult_v2",
+        "_comment": "★ table 改 squarstickresult_v2（v2 独立表，不污染老 squarstickresult）。其他沿用老 halcon"
+    },
+    "feishu": {
+        "enabled": false,
+        "app_id": "",
+        "app_secret": "",
+        "table_id": "",
+        "base_url": "https://open.feishu.cn/open-apis",
+        "_comment": "调试期 false — 别让现场飞书机器人收双份",
+        "app_token": ""
+    },
+    "image_store": {
+        "enabled": true,
+        "base_dir": "D:/SiRod_v2/images",
+        "_comment": "★ 全部改 D:/SiRod_v2/ 独立目录，跟老 D:/SiRod/ 隔离。web_url_base 加 /v2 子目录避免跟老共用图片路径",
+        "raw_tif_dir": "D:/SiRod_v2/ImageRaw",
+        "web_image_dir": "D:/SiRod/WebImage",
+        "web_url_base": "http://10.32.50.220:8080/"
+    },
+    "shift": {
+        "reset_times": [
+            "08:00",
+            "20:00"
+        ]
+    },
+    "scale": {
+        "_comment": "★ 现场标定值 ★ pixels_per_mm = 每毫米对应多少像素（5 = 5像素1mm）。仅影响显示/MES 上报的 mm 值，不影响判定(judge 仍用像素)。长度按直径口径=2×外接圆半径/ppm，面积=像素/ppm²。<=0 不显示 mm。",
+        "pixels_per_mm": 5.0
+    },
+    "line_id": "PV-B02",
+    "serial": {
+        "enabled": true,
+        "port": "COM1",
+        "baudrate": 9600,
+        "timeout": 1,
+        "ng_signal": "A0 00 08 CC",
+        "reset_signal": "A0 00 00 CC",
+        "_comment": "报警灯 / PLC。沿用老 halcon"
+    },
+    "alarm": {
+        "enabled": true
+    },
+    "http": {
+        "enabled": true,
+        "url": "http://10.31.20.29/MesAPI/Api/WMSToMESByProcedure",
+        "timeout": 10.0,
+        "head": {
+            "DEST_SYSTEM": "YC01MES",
+            "INTF_ID": "QPMES201",
+            "SRC_SYSTEM": "YinLieJianCe",
+            "SRC_MSGID": "",
+            "BACKUP1": "QPMES201_CryptoschisisDataEM",
+            "BACKUP2": "GRZ"
+        },
+        "_comment": "★ enabled=false 调试期不发 MES。SRC_SYSTEM/BACKUP2 加 _V2 后缀防 MES 侧老版冲撞。URL 沿用老 halcon"
+    },
+    "_comment": "盐城 v2 部署 config — 现场参数沿用老 halcon 版本（Run.hdev / 老 config.json），加 v2 隔离（表名/存图/MES标识）。生成日期 2026-05-18，iter42。",
+    "scanner": {
+        "_comment": "v2 新增：Python 直接驱扫码枪（老 halcon 是 Halcon 内部读）。IP/端口同 Run.hdev:7314 的 ReaderIP/ReaderPort",
+        "enabled": true,
+        "host": "192.168.12.56",
+        "port": 5000,
+        "poll_interval_s": 5.0,
+        "recv_timeout_s": 1.0,
+        "reconnect_interval_s": 3.0
+    },
+    "camera": {
+        "_comment": "★ MultiFrame 100×150 帧 = 15000 行拼图（编码器同步对短帧更稳）。callback 模式接图（iter41）。multiframe_first_wait_s 对齐 Halcon BV_GrapImage:7184 wait_seconds(5)",
+        "width": 1024,
+        "height": 100,
+        "acquisition_mode": "MultiFrame",
+        "acquisition_frame_count": 150,
+        "multiframe_first_wait_s": 5.0,
+        "exposure_us": 100.0,
+        "trigger_source": "Software",
+        "grab_timeout_ms": 20000,
+        "loop_interval_s": 2.0
+    },
+    "judge": {
+        "_comment": "per_class 是 v2 新增按类别细粒度阈值，UI 参数 tab 现场可调（iter24 支持热加载，不用重启）",
+        "max_area": 10.0,
+        "sum_area": 10.0,
+        "max_count": 10,
+        "max_length": 2.0,
+        "per_class": [
+            {
+                "name": "隐裂",
+                "report_ng": true,
+                "max_area": 10.0,
+                "max_length": 2.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "崩边",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "其他",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "脏污",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "线痕",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "拼缝",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "OK",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            },
+            {
+                "name": "缺口",
+                "report_ng": false,
+                "max_area": 100.0,
+                "max_length": 5.0,
+                "max_count": 10,
+                "min_confidence": 0.0
+            }
+        ],
+        "ng_trigger_classes": [
+            "隐裂"
+        ]
+    },
+    "defect_types": [
+        "隐裂",
+        "崩边"
+    ]
+}
