@@ -570,6 +570,10 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLE)
 
+    # 全局禁用 数字框/下拉框 滚轮调值，防 operator 滚页面误改参数（判定阈值/相机参数等）
+    from ui.wheel_guard import install_wheel_guard
+    install_wheel_guard(app)
+
     try:
         controller = SiRodApp()
         controller.start()

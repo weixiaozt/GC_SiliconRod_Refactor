@@ -1447,6 +1447,10 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLE)
 
+    # 全局禁用 数字框/下拉框 滚轮调值，防 operator 滚页面误改参数（判定阈值/相机参数等）
+    from ui.wheel_guard import install_wheel_guard
+    install_wheel_guard(app)
+
     # ★ Round 7 ★ 把 QThreadPool 最大并发数从默认 (CPU 核数, 通常 4-8)
     # 提到 16。后台任务多（每根棒触发 1 个 BG task, MES 重试, async serial,
     # camera read/apply, DB query, MES retry, ...），burst 时不至于排队。
