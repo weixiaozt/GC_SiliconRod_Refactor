@@ -55,7 +55,19 @@
         "base_dir": "D:/SiRod_v2/images",
         "raw_tif_dir": "D:/SiRod_v2/ImageRaw",
         "web_image_dir": "D:/SiRod_v2/WebImage",
-        "web_url_base": "http://现场服务器IP:端口/v2"
+        "web_url_base": "http://现场服务器IP:端口/v2",
+        "cleanup": {
+            "_comment": "★ 存图自动清理，防硬盘满。删除时刻固定每天 20:00（写死在代码 main_camera._CLEANUP_HOUR，不开放配置）。默认 enabled=false。现场先开 dry_run=true 观察几天 log（只报将删什么不真删），确认无误删再把 dry_run 改 false 真删。retain_days 各类保留天数(可现场改 config)，<=0=不删该类。",
+            "enabled": false,
+            "dry_run": true,
+            "retain_days": {
+                "tif": 7,
+                "ok_full": 7,
+                "ng_full": 30,
+                "crops": 30,
+                "webimage": 30
+            }
+        }
     },
 
     "shift": {

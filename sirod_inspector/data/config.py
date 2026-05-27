@@ -28,7 +28,22 @@ _DEFAULT_CONFIG = {
         "table_id": "",
         "base_url": "https://open.feishu.cn/open-apis",
     },
-    "image_store": {"enabled": True, "base_dir": "D:/SiRod/images"},
+    "image_store": {
+        "enabled": True,
+        "base_dir": "D:/SiRod/images",
+        "cleanup": {
+            "enabled": False,          # 默认关，现场跑稳再开
+            "dry_run": True,           # 默认只 log 不真删，观察几天确认无误删再关
+            # 删除时刻固定每天 20:00（写死 main_camera._CLEANUP_HOUR，不开放配置）
+            "retain_days": {           # 各类保留天数，<=0 = 不删该类
+                "tif": 7,              # ImageRaw uint16 原图（30MB/根，空间大头）
+                "ok_full": 7,          # OK 全图（量大价值低）
+                "ng_full": 30,         # NG 全图（少且重要）
+                "crops": 30,           # 缺陷小图
+                "webimage": 30,        # WebImage（NG 给 MES 拉图）
+            },
+        },
+    },
     "shift": {"reset_times": ["08:00", "20:00"]},
     "line_id": "PV-B02",
     "serial": {

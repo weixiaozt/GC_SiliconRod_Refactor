@@ -62,6 +62,7 @@ try:
     from core.scanner_client import ScannerClient
     from core.serial_manager import SerialManager
     from core.http_client import MesHttpClient
+    from core.image_cleaner import ImageCleaner
     from ui.styles import DARK_STYLE
     from ui.main_window import MainWindow
     from ui.overview_page import OverviewPage
@@ -80,6 +81,11 @@ except ImportError as e:
     print("请确保已安装所有依赖: "
           "pip install PyQt6 numpy Pillow pymysql matplotlib openpyxl requests pyserial opencv-python")
     sys.exit(1)
+
+
+# 每日存图清理触发时刻（24 小时制）。★ 要改清理时间改这里 ★ —— 故意不开放到
+# config.json：清理时刻是运维策略，写死避免现场误配成白天高峰时段拖慢检测。
+_CLEANUP_HOUR = 20
 
 
 def save_inspect_images(data: InspectData, detection_result,
@@ -511,6 +517,21 @@ class SiRodCameraApp(QObject):
         self._mes_retry_timer = QTimer()
         self._mes_retry_timer.timeout.connect(self._on_mes_retry_tick)
         self._mes_retry_timer.start(60_000)
+
+        # 存图自动清理：每天 _CLEANUP_HOUR 点(20:00)触发一次，删 N 天前的图防硬盘满。
+        # 触发时刻写死 _CLEANUP_HOUR（要改改代码，不开放 config）；保留天数在 config 可调。
+        # 用每分钟检查的 timer（模仿班次清零 _shift_timer），到点且今天没跑过才触发。
+        _cleanup_cfg = self.config.get("image_store.cleanup", {}) or {}
+        self._last_cleanup_date = None
+        self._cleanup_timer = None
+        if bool(_cleanup_cfg.get("enabled", False)):
+            self._cleanup_timer = QTimer()
+            self._cleanup_timer.timeout.connect(self._check_cleanup_schedule)
+            self._cleanup_timer.start(60_000)   # 每分钟检查是否到 _CLEANUP_HOUR 点
+            logger.info(
+                f"存图自动清理已启用: 每天 {_CLEANUP_HOUR:02d}:00 触发"
+                + ("（DRY-RUN 不真删）" if _cleanup_cfg.get("dry_run", True) else "")
+            )
 
         # UI 心跳：定时器每秒 tick，但 ★ Round 3 优化 ★ 默认只每 10s log 一行，
         # 检测到 freeze (tick 间隔 > 1.5s) 时立即 log 警告。
@@ -1019,6 +1040,62 @@ class SiRodCameraApp(QObject):
                     logger.error(f"MES 重试 flush 异常: {e}", exc_info=True)
 
         t = _RetryTask()
+        t.setAutoDelete(True)
+        QThreadPool.globalInstance().start(t)
+
+    def _check_cleanup_schedule(self) -> None:
+        """每分钟检查：到了每天 _CLEANUP_HOUR 点(20:00)且今天还没清理过 → 触发后台清理。
+
+        模仿班次清零的定时检查思路。删除时刻 _CLEANUP_HOUR 写死在模块顶部、
+        不开放 config（要改清理时间改代码）。程序若 20:00 后才开机，启动后第一次
+        检查会补跑当天清理（防漏）；当天跑过一次后 _last_cleanup_date 拦住不重复。
+        """
+        cleanup_cfg = self.config.get("image_store.cleanup", {}) or {}
+        if not bool(cleanup_cfg.get("enabled", False)):
+            return
+        now = datetime.datetime.now()
+        if now.hour < _CLEANUP_HOUR:
+            return
+        if self._last_cleanup_date == now.date():
+            return   # 今天已清理过，不重复
+        self._last_cleanup_date = now.date()
+        logger.info(f"到达每日清理时刻 {_CLEANUP_HOUR:02d}:00，触发存图清理")
+        self._on_cleanup_tick()
+
+    def _on_cleanup_tick(self) -> None:
+        """执行一次后台存图清理（QThreadPool；删大量文件耗时，别卡 UI）。
+
+        路径 resolve 复用 _save_images 同款 _abs_path（相对路径基于项目根，
+        防 cwd 被 init_runtime chdir 到 EasyLabel 后删错位置）。
+        """
+        from PyQt6.QtCore import QRunnable, QThreadPool
+
+        def _abs_path(p: str) -> str:
+            if not p:
+                return p
+            return p if os.path.isabs(p) else os.path.join(_PARENT_DIR, p)
+
+        cleanup_cfg = self.config.get("image_store.cleanup", {}) or {}
+        base_dir = _abs_path(
+            self.config.get("image_store.base_dir", "D:/SiRod/images"))
+        raw_tif_dir = _abs_path(
+            self.config.get("image_store.raw_tif_dir", "D:/SiRod/ImageRaw"))
+        web_image_dir = _abs_path(
+            self.config.get("image_store.web_image_dir", "D:/SiRod/WebImage"))
+
+        class _CleanupTask(QRunnable):
+            def run(self):
+                try:
+                    ImageCleaner(
+                        base_dir=base_dir,
+                        raw_tif_dir=raw_tif_dir,
+                        web_image_dir=web_image_dir,
+                        cleanup_cfg=cleanup_cfg,
+                    ).cleanup()
+                except Exception as e:
+                    logger.error(f"存图清理异常: {e}", exc_info=True)
+
+        t = _CleanupTask()
         t.setAutoDelete(True)
         QThreadPool.globalInstance().start(t)
 
