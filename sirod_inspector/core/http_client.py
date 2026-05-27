@@ -21,6 +21,12 @@ MES HTTP 上传客户端
     ]
 }
 
+★ 注意：上面 BODY 是「逻辑结构」；实际发送时 BODY 被序列化成「转义的 JSON 字符串」，
+  即真正发出的是 {"HEAD":{...}, "BODY":"[{\"BlockCode\":...}]"}。
+  原因：MES(WMSToMESByProcedure) 存储过程对 BODY 做 JSON_VALUE 取标量再 OPENJSON，
+  发嵌套数组会得到 NULL → OPENJSON('null') → "JSON 文本格式不正确。位置 0…非预期字符 n"。
+  可用 http.body_as_json_string=false 关掉（默认 true）。详见 build_payload。
+
 从 AppConfig 读取：
     http.enabled       bool,  是否启用 MES 上传
     http.url           str,   接口地址
@@ -149,9 +155,21 @@ class MesHttpClient:
                 if raw_key in raw and raw[raw_key] is not None:
                     body_item[mes_key] = raw[raw_key]
 
+        # ── BODY 必须是「转义的 JSON 字符串」，不能是嵌套数组/对象 ──
+        # 宜宾/盐城 MES 的 WMSToMESByProcedure 是存储过程式接口：它对 BODY 做
+        # JSON_VALUE(@input, '$.BODY') 取标量 —— 若 BODY 是数组/对象，JSON_VALUE
+        # 返回 NULL，后续 OPENJSON('null') 抛 "JSON 文本格式不正确。位置 0…非预期字符 n"。
+        # 把 BODY 序列化成字符串 "[{...}]" 后 JSON_VALUE 拿到字符串、OPENJSON 才解析得了。
+        # 现场实测(2026-05-28, 晶编 BP649A104271XC0)：BODY=数组/对象→位置0 n；BODY=字符串→越过解析。
+        # 留 http.body_as_json_string 开关(默认 True)以防个别厂区接口不同。
+        if bool(self.config.get("http.body_as_json_string", True)):
+            body_payload = json.dumps([body_item], ensure_ascii=False)
+        else:
+            body_payload = [body_item]
+
         return {
             "HEAD": head,
-            "BODY": [body_item],
+            "BODY": body_payload,
         }
 
     def _check_biz_response(self, body: dict) -> tuple:
@@ -343,7 +361,10 @@ class MesHttpClient:
             timeout = 10.0
 
         payload = self.build_payload(inspect_data)
-        rod_id = payload["BODY"][0]["BlockCode"]
+        # rod_id 直接从 inspect_data 取 —— BODY 现在可能被序列化成 JSON 字符串，
+        # 不能再用 payload["BODY"][0]["BlockCode"]（对字符串下标会报错）。
+        _raw = getattr(inspect_data, "raw_json", {}) or {}
+        rod_id = str(_raw.get("晶编") or getattr(inspect_data, "rod_id", "") or "")
 
         if not rod_id:
             msg = "BlockCode 为空，跳过上传"
