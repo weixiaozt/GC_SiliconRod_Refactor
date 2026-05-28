@@ -21,11 +21,12 @@ MES HTTP 上传客户端
     ]
 }
 
-★ 注意：上面 BODY 是「逻辑结构」；实际发送时 BODY 被序列化成「转义的 JSON 字符串」，
-  即真正发出的是 {"HEAD":{...}, "BODY":"[{\"BlockCode\":...}]"}。
-  原因：MES(WMSToMESByProcedure) 存储过程对 BODY 做 JSON_VALUE 取标量再 OPENJSON，
-  发嵌套数组会得到 NULL → OPENJSON('null') → "JSON 文本格式不正确。位置 0…非预期字符 n"。
-  可用 http.body_as_json_string=false 关掉（默认 true）。详见 build_payload。
+★ 注意：BODY 形态按厂区不同（http.body_as_json_string，默认 False=数组）。
+  • 盐城 MES：BODY 发嵌套数组 [{...}] 即可（现场在用，默认就是这个）。
+  • 宜宾 MES：proc 对 BODY 做 JSON_VALUE 取标量再 OPENJSON，发数组会得 NULL →
+    OPENJSON('null') → "JSON 文本格式不正确。位置 0…非预期字符 n"。这类厂区需在 config
+    设 http.body_as_json_string=true，BODY 改发转义字符串 {"HEAD":{...}, "BODY":"[{...}]"}。
+  默认 False 是为了不改变盐城现状；需要字符串的厂区显式开 true。详见 build_payload。
 
 从 AppConfig 读取：
     http.enabled       bool,  是否启用 MES 上传
@@ -155,14 +156,15 @@ class MesHttpClient:
                 if raw_key in raw and raw[raw_key] is not None:
                     body_item[mes_key] = raw[raw_key]
 
-        # ── BODY 必须是「转义的 JSON 字符串」，不能是嵌套数组/对象 ──
-        # 宜宾/盐城 MES 的 WMSToMESByProcedure 是存储过程式接口：它对 BODY 做
-        # JSON_VALUE(@input, '$.BODY') 取标量 —— 若 BODY 是数组/对象，JSON_VALUE
-        # 返回 NULL，后续 OPENJSON('null') 抛 "JSON 文本格式不正确。位置 0…非预期字符 n"。
-        # 把 BODY 序列化成字符串 "[{...}]" 后 JSON_VALUE 拿到字符串、OPENJSON 才解析得了。
-        # 现场实测(2026-05-28, 晶编 BP649A104271XC0)：BODY=数组/对象→位置0 n；BODY=字符串→越过解析。
-        # 留 http.body_as_json_string 开关(默认 True)以防个别厂区接口不同。
-        if bool(self.config.get("http.body_as_json_string", True)):
+        # ── BODY 形态按厂区不同（http.body_as_json_string，默认 False=数组）──
+        # 两地 MES 的 WMSToMESByProcedure 存储过程行为不一样：
+        #   • 盐城：BODY 发嵌套数组 [{...}] 即可（现场在用；默认就是这个，别动）。
+        #   • 宜宾：proc 对 BODY 做 JSON_VALUE(@input,'$.BODY') 取标量 —— 数组会得 NULL →
+        #     OPENJSON('null') → "JSON 文本格式不正确。位置 0…非预期字符 n"。必须 config 设
+        #     true，把 BODY 序列化成字符串 "[{...}]"，JSON_VALUE 才拿得到、OPENJSON 才解析得了。
+        # 现场实测(2026-05-28,晶编 BP649A104271XC0)：宜宾 BODY=数组→位置0 n；BODY=字符串→越过解析。
+        # 默认 False 是为了「不改变盐城现状」——需要字符串的厂区在 config 显式开 true。
+        if bool(self.config.get("http.body_as_json_string", False)):
             body_payload = json.dumps([body_item], ensure_ascii=False)
         else:
             body_payload = [body_item]
