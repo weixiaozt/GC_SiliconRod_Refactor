@@ -51,6 +51,10 @@ logger = logging.getLogger("SiRod.Scanner")
 _TRIGGER_TEXT = b"start\x00"   # 海康"TCP 触发文本"=start，+ NUL 跟老 Halcon send_data 'z' 实际发的 6 字节一致
 _TERMINATORS = (b"\x00", b"\r\n", b"\n", b"\r")
 
+# ★看门狗★ 连续这么多根棒「检测完成却没扫到码」就判半开/僵尸连接、强制重连。
+# 想改阈值直接改这里（按需求不开放到 config.json）。
+_ZOMBIE_MISS_LIMIT = 5
+
 
 def _apply_socket_tuning(sock: socket.socket) -> None:
     """禁 Nagle + 开 KEEPALIVE，工业 socket 标配"""
@@ -198,6 +202,10 @@ class ScannerClient:
         self._triggers_window = 0
         self._messages_window = 0
         self._last_heartbeat_t = 0.0
+        self._watchdog_reconnects_total = 0   # ★看门狗★ 累计强制重连次数（诊断用）
+        # ★看门狗★ 自上次扫到码以来"检测完成(确有棒经过)"的连续根数。
+        # notify_activity() 每完成一根 +1；扫到码清 0；连续 _ZOMBIE_MISS_LIMIT 根没码 → 重连。
+        self._rods_since_barcode = 0
 
         self._stop_flag = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -236,11 +244,23 @@ class ScannerClient:
                 return True
             return False
 
+    def notify_activity(self) -> None:
+        """由检测流水线在「每完成一次检测(确有棒经过)」时调用 = 一根棒过去了。
+
+        看门狗逻辑（只此一条）：有棒过、却连续 `_ZOMBIE_MISS_LIMIT` 根没扫到码 → 判半开/
+        僵尸连接、强制重连。这里每完成一根 +1；一旦扫到码就清 0（见 `_update_rod_id`）。
+        纯空闲（没棒过）时这里根本不会被调用 → 计数不涨 → 永不重连。
+        """
+        with self._lock:
+            self._rods_since_barcode += 1
+
     def stats_snapshot(self) -> dict:
         return {
             "recv_bytes_total": self._recv_bytes_total,
             "barcodes_total": self._barcodes_total,
             "triggers_total": self._triggers_total,
+            "watchdog_reconnects_total": self._watchdog_reconnects_total,
+            "rods_since_barcode": self._rods_since_barcode,
             "connected": self._connected,
         }
 
@@ -327,6 +347,7 @@ class ScannerClient:
         with self._lock:
             self._latest_rod_id = rod_id
             self._latest_at = datetime.datetime.now()
+            self._rods_since_barcode = 0   # ★看门狗★ 扫到码 → 连续没码计数清零
         self._barcodes_total += 1
         self._barcodes_window += 1
         logger.info(f"扫码: {rod_id}  (total={self._barcodes_total})")
@@ -344,7 +365,8 @@ class ScannerClient:
             f"recv_bytes={self._recv_bytes_window} barcodes={self._barcodes_window} "
             f"triggers={self._triggers_window} msgs={self._messages_window} "
             f"| total: recv_bytes={self._recv_bytes_total} "
-            f"barcodes={self._barcodes_total} triggers={self._triggers_total}"
+            f"barcodes={self._barcodes_total} triggers={self._triggers_total} "
+            f"wd_reconnects={self._watchdog_reconnects_total} miss={self._rods_since_barcode}"
         )
         self._recv_bytes_window = 0
         self._barcodes_window = 0
@@ -456,13 +478,30 @@ class ScannerClient:
                     self._flush_stale_buffer(buf)
                     last_recv_t = 0.0
 
-            # 4) 周期 keepalive trigger（对齐 Halcon Rec_Code:7354）
+            # 4) ★看门狗（唯一逻辑）★ 有棒过、却连续 N 根没扫到码 → 半开/僵尸连接，强制重连。
+            #    背景(2026-05-28 宜宾)：TCP 半开后 recv 永远走上面 `except socket.timeout: pass`、
+            #    sendall('start') 也不报错，于是 _connected 一直 True、永不重连——复产后每根棒
+            #    NoRead，只能人工重启。判据只看「有棒过却没码」：notify_activity 每完成一根 +1，
+            #    扫到码清 0；连续 _ZOMBIE_MISS_LIMIT 根没码就重连。纯空闲(没棒)时计数不涨 → 不动它。
+            if self._connected and self._rods_since_barcode >= _ZOMBIE_MISS_LIMIT:
+                with self._lock:
+                    missed = self._rods_since_barcode
+                    self._rods_since_barcode = 0   # 重置，避免立刻再触发
+                self._watchdog_reconnects_total += 1
+                logger.warning(
+                    f"[看门狗] 连续 {missed} 根棒检测完成却没扫到码（半开/僵尸连接），"
+                    f"强制重连。累计看门狗重连={self._watchdog_reconnects_total}"
+                )
+                self._close_sock()
+                continue
+
+            # 5) 周期 keepalive trigger（对齐 Halcon Rec_Code:7354）
             now = time.monotonic()
             if (now - last_trigger_t) >= self.poll_interval_s:
                 if self._send_trigger():
                     last_trigger_t = now
 
-            # 5) 心跳
+            # 6) 心跳
             self._maybe_heartbeat()
 
         logger.info("扫码枪循环已退出")

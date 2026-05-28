@@ -709,6 +709,14 @@ class SiRodCameraApp(QObject):
             f"ct={data.ct*1000:.0f}ms"
         )
 
+        # ★看门狗★ 喂入"产线活动"信号：一次检测完成 = 确有棒经过（含 NoRead）。
+        # 扫码枪看门狗据此区分"真空闲(没棒)"与"僵尸连接(有棒却扫不到码)"，只在后者才重连。
+        if self.scanner is not None:
+            try:
+                self.scanner.notify_activity()
+            except Exception:
+                pass
+
         # ★ peek-then-confirm 配套：trigger 成功了，确认消费 scanner 棒号 ★
         # 只在 scanner 当前最新棒号 == 本次用的棒号时才消费 reset，
         # 避免 trigger 期间扫到的下一根棒被误消费

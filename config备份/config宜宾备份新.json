@@ -27,7 +27,7 @@
         "_comment": "★ 全部改 D:/SiRod_v2/ 独立目录，跟老 D:/SiRod/ 隔离。web_url_base 加 /v2 子目录避免跟老共用图片路径",
         "raw_tif_dir": "D:/SiRod_v2/ImageRaw",
         "web_image_dir": "D:/SiRod/WebImage",
-        "web_url_base": "http://10.32.50.220:8080/"
+        "web_url_base": "http://10.26.128.250:8080/"
     },
     "shift": {
         "reset_times": [
