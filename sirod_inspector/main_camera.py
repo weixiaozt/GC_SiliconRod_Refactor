@@ -62,7 +62,6 @@ try:
     from core.scanner_client import ScannerClient
     from core.serial_manager import SerialManager
     from core.http_client import MesHttpClient
-    from core.image_cleaner import ImageCleaner
     from ui.styles import DARK_STYLE
     from ui.main_window import MainWindow
     from ui.overview_page import OverviewPage
@@ -81,6 +80,17 @@ except ImportError as e:
     print("请确保已安装所有依赖: "
           "pip install PyQt6 numpy Pillow pymysql matplotlib openpyxl requests pyserial opencv-python")
     sys.exit(1)
+
+
+# 自动删图(image_cleaner)为「可选模块」：缺失时降级为「不自动删图」，不让整个程序起不来。
+# 现场若只要扫码枪看门狗、不要自动删图，不部署 core/image_cleaner.py 即可——
+# 这里单独 try：缺了只是 ImageCleaner=None（自动删图关闭），不影响其他功能。
+try:
+    from core.image_cleaner import ImageCleaner
+except ImportError as _ic_err:
+    ImageCleaner = None
+    logger.warning(
+        f"core.image_cleaner 不可用 → 自动删图已关闭（其余功能正常）: {_ic_err}")
 
 
 # 每日存图清理触发时刻（24 小时制）。★ 要改清理时间改这里 ★ —— 故意不开放到
@@ -524,7 +534,7 @@ class SiRodCameraApp(QObject):
         _cleanup_cfg = self.config.get("image_store.cleanup", {}) or {}
         self._last_cleanup_date = None
         self._cleanup_timer = None
-        if bool(_cleanup_cfg.get("enabled", False)):
+        if ImageCleaner is not None and bool(_cleanup_cfg.get("enabled", False)):
             self._cleanup_timer = QTimer()
             self._cleanup_timer.timeout.connect(self._check_cleanup_schedule)
             self._cleanup_timer.start(60_000)   # 每分钟检查是否到 _CLEANUP_HOUR 点
@@ -1076,6 +1086,8 @@ class SiRodCameraApp(QObject):
         路径 resolve 复用 _save_images 同款 _abs_path（相对路径基于项目根，
         防 cwd 被 init_runtime chdir 到 EasyLabel 后删错位置）。
         """
+        if ImageCleaner is None:
+            return   # 自动删图模块未部署 → 跳过（setup 已 gate，此处双保险）
         from PyQt6.QtCore import QRunnable, QThreadPool
 
         def _abs_path(p: str) -> str:
