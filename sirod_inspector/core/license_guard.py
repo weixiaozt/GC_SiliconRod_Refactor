@@ -292,10 +292,32 @@ def _license_candidates() -> list:
     env = os.environ.get(_LICENSE_ENV)
     if env:
         paths.append(Path(env))
+    # 当前工作目录 —— launcher 启动 main_camera 时 cwd=项目根；site 钩子部署方式
+    # （license_guard 装在 site-packages，_project_root 指不到项目）靠这个找到 license.dat。
+    try:
+        paths.append(Path.cwd() / _LICENSE_FILENAME)
+    except Exception:  # noqa: BLE001
+        pass
+    # 主程序所在目录及其上一级（main_camera.py 在 sirod_inspector/ 下，项目根=其父）
+    try:
+        argv0 = sys.argv[0] if sys.argv else ""
+        if argv0:
+            appdir = Path(argv0).resolve().parent
+            paths.append(appdir / _LICENSE_FILENAME)
+            paths.append(appdir.parent / _LICENSE_FILENAME)
+    except Exception:  # noqa: BLE001
+        pass
     root = _project_root()
     paths.append(root / _LICENSE_FILENAME)
     paths.append(root / "sirod_inspector" / _LICENSE_FILENAME)
-    return paths
+    # 去重保序
+    seen, uniq = set(), []
+    for p in paths:
+        k = str(p)
+        if k not in seen:
+            seen.add(k)
+            uniq.append(p)
+    return uniq
 
 
 def _find_license(explicit: Optional[str] = None) -> Optional[Path]:
@@ -419,6 +441,10 @@ def check_license(pubkey_hex: Optional[str] = None,
 # ─────────────────────────────────────────────────────────────────────────
 
 def _message_box(text: str, title: str, error: bool = True) -> None:
+    # headless/测试模式：不弹框，打到 stderr（只改提示方式，不影响锁判定）
+    if os.environ.get("SIROD_NO_MSGBOX") == "1":
+        print(f"[{title}] {text}", file=sys.stderr)
+        return
     try:
         import ctypes
         # MB_OK | (MB_ICONERROR|MB_ICONINFORMATION) | MB_SETFOREGROUND | MB_TOPMOST
