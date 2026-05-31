@@ -9,16 +9,14 @@ r"""
 
 做的事：
   1. 按本 python 版本自动挑对应的 license_guard.<abi>.pyd（3.10→cp310 / 3.11→cp311…）
-  2. 把  license_guard.pyd + sirod_license_hook.py + sirod_lock.pth  拷进 site-packages
-  3. pip install cryptography
-  4. 自检并打印当前授权状态
+  2. 挑一个★可写★的 site-packages（系统目录只读时退到用户级，Store 版 python 必需）
+  3. 把  license_guard.pyd + sirod_license_hook.py + sirod_lock.pth  拷进去
+  4. pip install cryptography，自检并打印当前授权状态
 查找 .pyd 的位置：脚本同目录 → 仓库 build\ 下 → tools\（hook/.pth 在 tools\）。
-所以既能在仓库里直接跑，也能把"脚本+3个文件"打成一个便携文件夹拷到现场跑。
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import site
 import subprocess
@@ -32,24 +30,73 @@ HOOK_NAME = "sirod_license_hook.py"
 PTH_NAME = "sirod_lock.pth"
 
 
-def _site_packages() -> Path:
-    cands = []
+def _candidate_site_dirs() -> list:
+    dirs = []
     try:
-        cands += list(site.getsitepackages())
+        dirs += [Path(p) for p in site.getsitepackages()]
     except Exception:  # noqa: BLE001
         pass
     try:
-        cands.append(site.getusersitepackages())
+        u = site.getusersitepackages()
+        if u:
+            dirs.append(Path(u))
     except Exception:  # noqa: BLE001
         pass
-    for c in cands:
-        p = Path(c)
-        if p.name == "site-packages" and p.exists():
-            return p
-    for c in cands:
-        if Path(c).exists():
-            return Path(c)
-    raise RuntimeError("找不到 site-packages")
+    seen, out = set(), []
+    for p in dirs:
+        if str(p) not in seen:
+            seen.add(str(p))
+            out.append(p)
+    return out
+
+
+def _can_write(p: Path) -> bool:
+    try:
+        if not p.exists():
+            return False
+        t = p / ".sirod_wtest.tmp"
+        t.write_text("x", encoding="ascii")
+        t.unlink()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _user_site() -> Path | None:
+    try:
+        u = site.getusersitepackages()
+        return Path(u) if u else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pick_site_packages():
+    """挑一个★可写★的 site-packages。返回 (路径, 是否用户级)。
+
+    Microsoft Store 版 python 的系统 site-packages 在 Program Files\\WindowsApps 下是
+    只读的，会退到用户级（AppData 下，可写；必要时创建）。
+    """
+    user = _user_site()
+    user_str = str(user) if user else None
+    cands = _candidate_site_dirs()
+    # 1) 可写、名为 site-packages 的系统目录优先（锁对该 python 全局生效）
+    for p in cands:
+        if p.name == "site-packages" and str(p) != user_str and _can_write(p):
+            return p, False
+    # 2) 任意可写候选
+    for p in cands:
+        if _can_write(p):
+            return p, (str(p) == user_str)
+    # 3) 用户级，建好再用
+    if user is not None:
+        try:
+            user.mkdir(parents=True, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        if _can_write(user):
+            return user, True
+    raise RuntimeError("找不到可写的 site-packages —— 试试以管理员身份运行本脚本，"
+                       "或改用普通 python（非 Microsoft Store 版）。")
 
 
 def _find(name: str) -> Path | None:
@@ -61,13 +108,20 @@ def _find(name: str) -> Path | None:
     return None
 
 
-def _uninstall(sp: Path) -> int:
+def _uninstall() -> int:
+    # 在所有候选 site-packages（系统 + 用户级）里删，确保装哪都能撤干净
     n = 0
-    for f in list(sp.glob("license_guard.*.pyd")) + [sp / HOOK_NAME, sp / PTH_NAME]:
-        if f.is_file():
-            f.unlink()
-            print(f"  删 {f.name}")
-            n += 1
+    seen = set()
+    for sp in _candidate_site_dirs():
+        for f in list(sp.glob("license_guard.*.pyd")) + [sp / HOOK_NAME, sp / PTH_NAME]:
+            if f.is_file() and str(f) not in seen:
+                try:
+                    f.unlink()
+                    print(f"  删 {f}")
+                    n += 1
+                    seen.add(str(f))
+                except Exception as e:  # noqa: BLE001
+                    print(f"  [!] 删不掉 {f}: {e}")
     print(f"[OK] 已卸载 {n} 个文件，锁已撤（license.dat 可留可删）。")
     return 0
 
@@ -76,34 +130,46 @@ def main() -> int:
     print("=" * 64)
     print(f"  方案B 安装器 | python {sys.version.split()[0]} ({TAG})")
     print(f"  目标 python : {sys.executable}")
-    sp = _site_packages()
-    print(f"  site-packages: {sp}")
-    print("=" * 64)
 
     if "--uninstall" in sys.argv:
-        return _uninstall(sp)
+        print("=" * 64)
+        return _uninstall()
 
-    pyd = _find(PYD_NAME)
-    hook = _find(HOOK_NAME)
-    pth = _find(PTH_NAME)
+    try:
+        sp, is_user = _pick_site_packages()
+    except RuntimeError as e:
+        print(f"[X] {e}")
+        return 1
+    print(f"  site-packages: {sp}")
+    if is_user:
+        print("  (用户级 site-packages —— Store/无管理员时的可写位置；锁对‘这个用户启动 app’"
+              "生效，单用户工控机没问题)")
+    print("=" * 64)
+
+    pyd, hook, pth = _find(PYD_NAME), _find(HOOK_NAME), _find(PTH_NAME)
     missing = []
     if not pyd:
         missing.append(f"{PYD_NAME}  ← 本 python 是 {TAG}，需要这个版本的锁；"
-                       f"放脚本同目录或 build\\ 下（先编好对应版本的 .pyd）")
+                       f"放脚本同目录或 build\\ 下")
     if not hook:
-        missing.append(HOOK_NAME)
+        missing.append(HOOK_NAME + "  ← 应在 tools\\ 或脚本同目录")
     if not pth:
-        missing.append(PTH_NAME)
+        missing.append(PTH_NAME + "  ← 应在 tools\\ 或脚本同目录")
     if missing:
         print("[X] 缺少文件：")
         for m in missing:
             print("   -", m)
         return 1
 
-    shutil.copy2(pyd, sp / PYD_NAME)
-    shutil.copy2(hook, sp / HOOK_NAME)
-    shutil.copy2(pth, sp / PTH_NAME)
-    print(f"[OK] 已拷入 site-packages：{PYD_NAME} / {HOOK_NAME} / {PTH_NAME}")
+    try:
+        shutil.copy2(pyd, sp / PYD_NAME)
+        shutil.copy2(hook, sp / HOOK_NAME)
+        shutil.copy2(pth, sp / PTH_NAME)
+    except PermissionError as e:
+        print(f"[X] 拷贝被拒（{e}）—— 该 site-packages 不可写。"
+              "请以管理员身份重跑，或改用普通 python。")
+        return 1
+    print(f"[OK] 已拷入：{PYD_NAME} / {HOOK_NAME} / {PTH_NAME}")
 
     print("[*] pip install cryptography ...")
     r = subprocess.run([sys.executable, "-m", "pip", "install",
@@ -113,19 +179,19 @@ def main() -> int:
 
     print("[*] 自检 ...")
     try:
-        import license_guard  # 刚拷进 site-packages，本进程可直接 import
+        import license_guard
         st = license_guard.check_license()
         print(f"    锁组件就位；当前授权状态：{st.code} — {st.message}")
         if st.code == "NO_LICENSE":
-            print("    （正常：还没放 license.dat。签发后放到项目根目录即可。）")
+            print("    （正常：还没放 license.dat。签发后放到 app 启动目录/项目根即可。）")
     except Exception as e:  # noqa: BLE001
-        print(f"[!] 自检 import 失败：{e}")
-        print("    （确认 cryptography 已装、且 .pyd 版本与本 python 一致）")
+        print(f"[!] 自检 import 失败：{e}（确认 cryptography 已装、.pyd 版本与本 python 一致）")
 
     print("=" * 64)
     print("  装好了。接下来：")
-    print("   1) python tools\\get_machine_id.py   → 机器码发开发签发 license.dat")
-    print("   2) 把 license.dat 放项目根目录")
+    print("   1) 取机器码（装锁后可直接用）：")
+    print('      python -c "import license_guard; print(license_guard.fingerprint_blob())"')
+    print("   2) 把机器码发开发签发 license.dat，放 app 启动目录（项目根）")
     print("   3) 正常启动 app；★必测：把 license.dat 改名后启动应起不来★")
     print("   撤销：python scripts\\deploy\\install_hook.py --uninstall")
     print("=" * 64)
