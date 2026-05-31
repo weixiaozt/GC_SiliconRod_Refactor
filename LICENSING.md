@@ -244,6 +244,10 @@ uv run --no-project --python 3.10 --with nuitka python -m nuitka --module ^
 
 > 不确定目标机 Python 版本就先去那台敲 `python --version`。版本不对 `.pyd` 直接加载失败。
 
+> ★ **改过 `license_guard.py` 后，两个 .pyd（cp310/cp311）都必须重编再发** ★ —— `build\` 下的
+> .pyd 不会随源码自动更新；用旧 .pyd 部署 = 现场跑的是旧逻辑（典型症状：license.dat 在却报
+> `NO_LICENSE`，见 §六）。
+
 > `private_key.pem` 已被 `.gitignore` 排除。**再强调：私钥不进 git、不进现场、离线备份。**
 
 ---
@@ -419,13 +423,19 @@ python tools\license_gen.py issue --machine <宜宾blob> --expires 2027-06-30 --
 |---|---|---|
 | `NO_PUBKEY` | 没配公钥（还是占位符） | 编译前忘了粘公钥；重走「一次性准备」 |
 | `NO_CRYPTO` | 缺 cryptography | `pip install cryptography` |
-| `NO_LICENSE` | 没找到 license.dat | 把签发的 license.dat 放项目根 |
-| `BAD_FORMAT` | license.dat 损坏 | 重新签发 |
+| `NO_LICENSE` | 没找到 license.dat | 把签发的 license.dat 放项目根（app 启动 cwd）。**若 license.dat 确实在却仍报此错 → 见下面「⚠️ 旧 .pyd」** |
+| `BAD_FORMAT` | license.dat 损坏 | 重新签发（注意别存成 0 字节空文件） |
 | `BAD_SIGNATURE` | 被篡改 / 公私钥不配对 | 确认是本套私钥签的；重新签发 |
 | `MACHINE_MISMATCH` | 授权绑的不是这台机器 | 换机/换硬件了 → 重新取机器码签发 |
 | `EXPIRED` | 已过期 | 续期重签 |
 
-> license.dat 路径：环境变量 `SIROD_LICENSE` > 项目根 `license.dat` > `sirod_inspector\license.dat`。
+> license.dat 路径：环境变量 `SIROD_LICENSE` > **当前工作目录** > 主程序目录及其上级 > 项目根 > `sirod_inspector\`。
+
+> ⚠️ **旧 .pyd 陷阱（踩过一次，排查半天）**：`license.dat` 明明在项目根、内容也对，却一直
+> `NO_LICENSE` —— 多半是现场装的 `license_guard.pyd` 是**改 `license_guard.py` 之前**编的旧版
+> （旧版不会从 cwd 找证）。**改过 `license_guard.py` 就必须重编两个 .pyd（cp310/cp311）再部署。**
+> 自查：`python -c "import importlib.util,sys; s=importlib.util.spec_from_file_location('license_guard', r'<pyd路径>'); m=importlib.util.module_from_spec(s); sys.modules['license_guard']=m; s.loader.exec_module(m); print(m._license_candidates())"`
+> —— 候选里没有当前目录就是旧版。应急绕过：设环境变量 `SIROD_LICENSE=<license.dat 绝对路径>`。
 
 回归测试：`uv run python tests\smoke_license_guard.py`（覆盖全部判定分支）。
 
