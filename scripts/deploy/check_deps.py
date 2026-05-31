@@ -144,6 +144,7 @@ def check_python_packages() -> None:
         ("psutil", "psutil"),
         ("matplotlib", "matplotlib"),
         ("openpyxl", "openpyxl"),
+        ("cryptography", "cryptography"),   # 软件授权锁 license_guard 验签用
     ]
     missing = []
     for import_name, pip_name in packages:

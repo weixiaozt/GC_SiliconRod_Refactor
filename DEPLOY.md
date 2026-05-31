@@ -90,7 +90,7 @@ D:\EasyLabel_x64\DeepLearning\
 python -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 :: 装所有必需包
-pip install PyQt6 opencv-python numpy psutil pymysql requests pyserial Pillow matplotlib openpyxl
+pip install PyQt6 opencv-python numpy psutil pymysql requests pyserial Pillow matplotlib openpyxl cryptography
 ```
 
 如果还要走 Halcon 兜底（保留老版本），额外装：

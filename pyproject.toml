@@ -21,6 +21,7 @@ dependencies = [
     "psutil",
     "matplotlib",
     "openpyxl",
+    "cryptography",   # 软件授权锁（license_guard）Ed25519 验签用
 ]
 
 [project.optional-dependencies]

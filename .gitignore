@@ -59,3 +59,14 @@ dist/
 
 # IDE 工程配置（PyCharm / IntelliJ）
 .idea/
+
+# ── 软件授权锁（license_guard）★ 私钥/授权/编译产物绝不入库 ★ ──
+# 私钥：泄露 = 所有授权可被伪造（用 *.pem 兜底，当前项目无其它 pem）
+*.pem
+private_key.pem
+# 授权文件：每台机器签发，按机部署，不入库
+license.dat
+/license.dat
+sirod_inspector/license.dat
+# 编译产物：含内嵌真实公钥，keygen 后按需编译部署（源码 .py 留占位公钥进库）
+sirod_inspector/core/license_guard*.pyd

@@ -13,8 +13,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 OUT = ROOT / "SiliconRod_v2_deploy.zip"
 
+# tier B：编了授权锁 .pyd 就只发二进制、排除明文 license_guard.py（见 should_exclude）
+LOCK_PYD_EXISTS = any((ROOT / "sirod_inspector" / "core").glob("license_guard*.pyd"))
+
 INCLUDE_DIRS = ["sirod_inspector", "models", "scripts"]
-INCLUDE_FILES = ["DEPLOY.md"]
+# get_machine_id.py：现场取机器码用（license_gen.py 是厂商私钥侧工具，★不打进现场★）
+INCLUDE_FILES = ["DEPLOY.md", "tools/get_machine_id.py"]
 
 # EasyLabel AI runtime —— 现场缺 dnninfer.dll / dnndefine.dll 时必带
 # ★ 不要用 MvitSDK_4.1.23.622.exe 安装器，那个之前实测装不出来 ★
@@ -42,6 +46,16 @@ def should_exclude(rel_path: str) -> bool:
     if rel == "sirod_inspector/config.json":
         return True
     if rel == "sirod_inspector/shift_stats.json":
+        return True
+    # ── 授权锁 ──
+    # 私钥 / 任意 .pem 绝不进现场包
+    if rel.endswith(".pem"):
+        return True
+    # 每台机器单独签发的授权文件不打包（现场手动放对应那台的）
+    if parts[-1] == "license.dat":
+        return True
+    # tier B：编了 .pyd 就只发 .pyd，排除明文锁源码（否则现场能看到/删掉锁逻辑，白编）
+    if LOCK_PYD_EXISTS and rel == "sirod_inspector/core/license_guard.py":
         return True
     return False
 
@@ -96,6 +110,15 @@ def main():
     print(f"  原始大小: {total_bytes/1024/1024:.1f} MB")
     print(f"  zip 大小: {zip_size/1024/1024:.1f} MB "
           f"(压缩比 {(1 - zip_size/total_bytes)*100:.0f}%)")
+
+    # ── 授权锁打包状态（醒目，防忘编 .pyd 把明文锁发出去 / 漏锁）──
+    print()
+    if LOCK_PYD_EXISTS:
+        print("  授权锁: [OK] 已打包 license_guard.pyd（强制生效），已排除明文 .py")
+    else:
+        print("  授权锁: [!!] 未发现 license_guard.pyd —— 包里是明文 .py，现场会以")
+        print("         『源码宽松模式』运行 = 等于没锁！要启用锁先编译再重新打包：")
+        print("         scripts\\deploy\\build_license_guard.bat")
     if not lite:
         print()
         print("现场部署：")

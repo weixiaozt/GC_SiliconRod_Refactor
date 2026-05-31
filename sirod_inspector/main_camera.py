@@ -1526,6 +1526,14 @@ def _acquire_single_instance_lock():
 
 
 def main():
+    # ── 软件授权闸门（必须最先，早于单实例锁 / QApplication）──
+    # license_guard 生产是编译产物 .pyd：内嵌公钥验签 + 绑机器码 + 验到期。
+    # 校验不过 → 弹原生框后 sys.exit(0)；退 0 让 launcher 当“正常退出”，不触发 5 次
+    # 重启刷屏（见 scripts/deploy/launcher.py 退出码约定）。临期 → 弹提醒后放行。
+    # 源码态(.py, 开发机)默认放行 + WARNING，开发自己不会被锁；生产只发 .pyd 永远严格。
+    from core.license_guard import verify_or_exit
+    verify_or_exit()
+
     sys.excepthook = _global_exception_handler
 
     # 单实例锁 — 必须在 QApplication 之前（防止重复启 PyQt）
